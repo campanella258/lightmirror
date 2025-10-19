@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>格子ミラーシミュレータ（最終版：厳密・近似両対応）</title>
+  <style>
+    body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;padding:18px}
+    label{display:inline-block;margin:6px 8px 6px 0}
+    input[type=number]{width:90px}
+    #canvasWrap{margin-top:12px}
+    svg{border:1px solid #ddd;background:#fafafa}
+    .thumb{display:inline-block;margin:6px;border:1px solid #ccc;padding:6px;cursor:pointer;vertical-align:top}
+    .controls{margin-top:8px}
+    .small{font-size:0.9em;color:#555}
+    button{margin-right:6px}
+    details{margin-top:12px;background:#f9f9f9;border:1px solid #ccc;border-radius:6px;padding:8px}
+    details summary{cursor:pointer;font-weight:bold}
+    #progress{font-size:0.9em;color:#666;margin-left:8px}
+  </style>
+</head>
+<body>
+  <h2>格子ミラーシミュレータ（最終版）</h2>
+
+  <details>
+    <summary>🔍 探索モード・パラメータの説明</summary>
+    <p><b>完全探索：</b> すべての鏡配置を試して、経路で到達するセルのみを残した canonical 形ごとに一意化して数えます（＝真の有効パターン数）。時間がかかる場合があります。</p>
+    <p><b>近似：</b> ランダムまたはハイブリッドでサンプリングし、発見した**異なる経路の数**から母数を推定します。最長経路は優先的に保存します。</p>
+    <hr>
+    <p><b>注意：</b>「有効パターン数」は canonical（経路外の鏡を除いた一意形）の個数です。N=2 の期待値は 9（完全探索で検証）になります。</p>
+  </details>
+
+  <div>
+    <label>グリッドサイズ: <input id="sizeInput" type="number" min="1" max="10" value="3" /></label>
+    <label>入射位置（下から）: <select id="inputSelect"></select></label>
+  </div>
+
+  <div>
+    <label>探索モード:
+      <select id="modeSelect">
+        <option value="standard">標準近似</option>
+        <option value="hybrid">改良（長経路優先）</option>
+      </select>
+    </label>
+    <label>サンプル数: <input id="samplesInput" type="number" value="20000" min="1000" step="1000"></label>
+    <label>深さ制限: <input id="depthInput" type="number" value="200" min="1" step="1"></label>
+    <label><input id="forceExact" type="checkbox"> 強制: 完全探索（時間かかる）</label>
+    <button id="runBtn">探索開始</button>
+    <span id="progress"></span>
+  </div>
+
+  <div class="controls">
+    <strong>結果：</strong> <span id="resultSummary">---</span>
+  </div>
+
+  <div id="canvasWrap"></div>
+  <h3>有効パターン（代表） — クリックで詳細（上限200）</h3>
+  <div id="thumbs"></div>
+
+<script>
+/* ---------- 基本 ---------- */
+function reflect(dir, mirror){
+  if(mirror===0) return dir;
+  if(mirror===1) return [1,0,3,2][dir];
+  if(mirror===2) return [3,2,1,0][dir];
+  return dir;
+}
+function stepCell(r,c,dir){ return [[r-1,c],[r,c+1],[r+1,c],[r,c-1]][dir]; }
+
+function simulate(N, mirrorConfig, startInput){
+  let r=N-1, c=startInput, dir=0; const path=[];
+  const MAX_STEPS = 10000;
+  for(let steps=0; steps<MAX_STEPS; steps++){
+    if(r<0||r>=N||c<0||c>=N){
+      if(c===N && r>=0 && r<N) return {exited:true, exitSide:'R', exitRow:r, path};
+      return {exited:false, exitSide:'other', exitRow:null, path};
+    }
+    path.push([r,c]);
+    const idx = r*N + c;
+    dir = reflect(dir, mirrorConfig[idx]);
+    [r,c] = stepCell(r,c,dir);
+  }
+  return {exited:false, exitSide:'other', exitRow:null, path};
+}
+
+function canonicalizeConfig(N, cfg, path){
+  const newCfg = cfg.slice();
+  const visited = new Set(path.map(([r,c])=> r+','+c));
+  for(let r=0;r<N;r++) for(let c=0;c<N;c++) if(!visited.has(r+','+c)) newCfg[r*N+c]=0;
+  return newCfg;
+}
+const cfgToKey = cfg => cfg.join(',');
+
+/* ---------- 完全探索（正確に canonical 単位でカウント） ---------- */
+function fullEnumerate(N, startInput){
+  const seen = new Map(); // key -> {cfg,path,exitRow}
+  let longest = 0, best = null;
+  const total = Math.pow(3, N*N);
+
+  for(let t=0; t<total; t++){
+    let x=t;
+    const cfg = new Array(N*N);
+    for(let i=0;i<N*N;i++){ cfg[i] = x % 3; x = Math.floor(x/3); }
+    const res = simulate(N, cfg, startInput);
+    if(res.exited && res.exitSide === 'R'){
+      const canon = canonicalizeConfig(N, cfg, res.path);
+      const key = cfgToKey(canon);
+      if(!seen.has(key)){
+        // store the canonical config and the full path
+        seen.set(key, { cfg: canon, path: res.path.slice(), exitRow: res.exitRow });
+        if(res.path.length > longest){
+          longest = res.path.length;
+          best = { cfg: canon.slice(), path: res.path.slice(), exitRow: res.exitRow };
+        }
+      }
+    }
+  }
+  // make patterns array with best moved to front if present
+  const patterns = [...seen.values()];
+  if(best){
+    const bestKey = cfgToKey(best.cfg);
+    const idx = patterns.findIndex(p=>cfgToKey(p.cfg)===bestKey);
+    if(idx>0){
+      const p = patterns.splice(idx,1)[0];
+      patterns.unshift(p);
+    } else if(idx===-1){
+      // (shouldn't happen) ensure best is present
+      patterns.unshift(best);
+    }
+  }
+  return { count: seen.size, patterns, longest, totalConfigs: total };
+}
+
+/* ---------- 近似探索（軽量化） ---------- */
+async function approximateEnumerate(N, startInput, depthLimit, maxSamples, isHybrid, progressCb){
+  if(N <= 3) {
+    const res = fullEnumerate(N, startInput);
+    if(progressCb) progressCb(1,1);
+    return { estimatedCount: res.count, patterns: res.patterns, longest: res.longest, totalConfigs: res.totalConfigs };
+  }
+
+  const seen = new Map();
+  let longest = 0, best = null;
+  let current = new Array(N*N).fill(0);
+  const keepLimit = Math.min(5000, Math.max(200, Math.floor(maxSamples * 0.002)));
+
+  for(let s=0; s<maxSamples; s++){
+    const cfg = isHybrid ? current.slice() : new Array(N*N).fill(0);
+    for(let d=0; d<depthLimit; d++){
+      cfg[Math.floor(Math.random()*N*N)] = Math.floor(Math.random()*3);
+    }
+    const res = simulate(N, cfg, startInput);
+    if(res.exited && res.exitSide==='R'){
+      const canon = canonicalizeConfig(N, cfg, res.path);
+      const key = cfgToKey(canon);
+      if(!seen.has(key)){
+        if(seen.size < keepLimit){
+          seen.set(key, { cfg: canon, path: res.path.length>200 ? res.path.slice(0,200) : res.path.slice(), exitRow: res.exitRow });
+        } else if(Math.random() < 0.001){
+          // random replacement to allow some diversity
+          const keys = Array.from(seen.keys());
+          const rem = keys[Math.floor(Math.random()*keys.length)];
+          seen.delete(rem);
+          seen.set(key, { cfg: canon, path: res.path.length>200 ? res.path.slice(0,200) : res.path.slice(), exitRow: res.exitRow });
+        }
+      }
+      if(res.path.length > longest){
+        longest = res.path.length;
+        best = { cfg: canon.slice(), path: res.path.slice(), exitRow: res.exitRow };
+        if(isHybrid) current = canon.slice();
+      }
+    }
+    if(progressCb && s % Math.max(1, Math.floor(maxSamples/100)) === 0){
+      progressCb(s+1, maxSamples);
+    }
+    if(s % 2000 === 0) await new Promise(r=>setTimeout(r,0)); // yield to UI
+  }
+
+  if(progressCb) progressCb(maxSamples, maxSamples);
+
+  const total = Math.pow(3, N*N);
+  // estimated: scale by number of unique canonical patterns found per sample
+  const estimatedCount = Math.round(total * (seen.size / Math.max(1, maxSamples)));
+
+  const patterns = [...seen.values()];
+  if(best){
+    const bestKey = cfgToKey(best.cfg);
+    const idx = patterns.findIndex(p=>cfgToKey(p.cfg)===bestKey);
+    if(idx>0){
+      const p = patterns.splice(idx,1)[0];
+      patterns.unshift(p);
+    } else if(idx===-1){
+      patterns.unshift(best);
+    }
+  }
+  return { estimatedCount, patterns, longest, totalConfigs: total };
+}
+
+/* ---------- UI / 描画 ---------- */
+const sizeInput = document.getElementById('sizeInput');
+const inputSelect = document.getElementById('inputSelect');
+const runBtn = document.getElementById('runBtn');
+const modeSelect = document.getElementById('modeSelect');
+const samplesInput = document.getElementById('samplesInput');
+const depthInput = document.getElementById('depthInput');
+const forceExact = document.getElementById('forceExact');
+const resultSummary = document.getElementById('resultSummary');
+const canvasWrap = document.getElementById('canvasWrap');
+const thumbs = document.getElementById('thumbs');
+const progressSpan = document.getElementById('progress');
+
+function updateInputOptions(){
+  const N = parseInt(sizeInput.value,10);
+  inputSelect.innerHTML='';
+  const optAll = document.createElement('option'); optAll.value='all'; optAll.textContent='全体'; inputSelect.appendChild(optAll);
+  for(let i=0;i<N;i++){ const o=document.createElement('option'); o.value=i; o.textContent='入力 '+(i+1); inputSelect.appendChild(o); }
+}
+updateInputOptions();
+sizeInput.addEventListener('change', updateInputOptions);
+
+function drawGrid(N, cfg, path){
+  canvasWrap.innerHTML = '';
+  const svgNS='http://www.w3.org/2000/svg';
+  const cell = 60, w = cell*N + 120, h = cell*N + 40;
+  const svg = document.createElementNS(svgNS,'svg');
+  svg.setAttribute('width', w);
+  svg.setAttribute('height', h);
+
+  for(let r=0;r<N;r++) for(let c=0;c<N;c++){
+    const x = c*cell+20, y = r*cell+20;
+    const rect = document.createElementNS(svgNS,'rect');
+    rect.setAttribute('x', x); rect.setAttribute('y', y); rect.setAttribute('width', cell); rect.setAttribute('height', cell);
+    rect.setAttribute('fill','white'); rect.setAttribute('stroke','#ccc'); svg.appendChild(rect);
+    const m = cfg[r*N+c];
+    if(m===1||m===2){
+      const line = document.createElementNS(svgNS,'line');
+      if(m===1){ line.setAttribute('x1', x+cell-6); line.setAttribute('y1', y+6); line.setAttribute('x2', x+6); line.setAttribute('y2', y+cell-6); }
+      else { line.setAttribute('x1', x+6); line.setAttribute('y1', y+6); line.setAttribute('x2', x+cell-6); line.setAttribute('y2', y+cell-6); }
+      line.setAttribute('stroke','#222'); line.setAttribute('stroke-width',3); svg.appendChild(line);
+    }
+  }
+  if(path && path.length>0){
+    const pts = path.map(([r,c]) => (c*cell+20+cell/2)+','+(r*cell+20+cell/2)).join(' ');
+    const pl = document.createElementNS(svgNS,'polyline');
+    pl.setAttribute('points', pts); pl.setAttribute('fill','none'); pl.setAttribute('stroke','#d33'); pl.setAttribute('stroke-width','4');
+    pl.setAttribute('stroke-linecap','round'); pl.setAttribute('stroke-linejoin','round'); svg.appendChild(pl);
+  }
+  canvasWrap.appendChild(svg);
+}
+
+/* ---------- 実行処理 ---------- */
+runBtn.addEventListener('click', async ()=>{
+  const N = parseInt(sizeInput.value,10);
+  const mode = modeSelect.value;
+  const inputVal = inputSelect.value;
+  const maxSamples = parseInt(samplesInput.value,10);
+  const depthLimit = parseInt(depthInput.value,10);
+  const isHybrid = (mode==='hybrid');
+  const preferExact = forceExact.checked;
+  const autoExact = N <= 3;
+  const doExact = preferExact || autoExact;
+
+  thumbs.innerHTML=''; canvasWrap.innerHTML=''; progressSpan.textContent='';
+
+  // safety dialog for heavy full enumeration
+  const totalConfigs = Math.pow(3, N*N);
+  if(doExact && totalConfigs > 200000){
+    if(!confirm(`完全探索を選択しています。\nN=${N} の全配置数は ${totalConfigs.toLocaleString()} です。\nブラウザで長時間（数分〜数時間）かかる可能性があります。続行しますか？`)){
+      resultSummary.textContent='キャンセルされました。';
+      return;
+    }
+  }
+
+  resultSummary.textContent = doExact ? '完全探索中...' : '探索中...';
+  let combined = [], totalCount = 0, overallLongest = 0;
+
+  const inputs = (inputVal === 'all') ? [...Array(N).keys()] : [parseInt(inputVal,10)];
+
+  for(let sIdx=0; sIdx<inputs.length; sIdx++){
+    const s = inputs[sIdx];
+    progressSpan.textContent = `入力 ${s+1} を計算中...`;
+    let res;
+    if(doExact){
+      res = fullEnumerate(N, s);
+      // res.count is exact unique count
+      totalCount += res.count;
+    } else {
+      // approximateEnumerate supports progress callback
+      res = await approximateEnumerate(N, s, depthLimit, maxSamples, isHybrid, (done, total)=> {
+        progressSpan.textContent = `入力 ${s+1}: ${done}/${total} サンプル`;
+      });
+      totalCount += (res.estimatedCount ?? 0);
+    }
+    if(res.longest > overallLongest) overallLongest = res.longest ?? 0;
+    // attach inputIndex for combined display
+    res.patterns.forEach(p => combined.push(Object.assign({inputIndex: s}, p)));
+  }
+
+  progressSpan.textContent = '';
+  resultSummary.innerHTML = `<b>${ inputVal === 'all' ? '全体' : '個別' }（${doExact ? '完全探索' : '近似'}）</b><br>` +
+    (doExact ? `有効パターン数（正確）: ${totalCount}` : `推定有効パターン数: 約${totalCount}`) +
+    `<br>発見された最長経路マス数: ${overallLongest}`;
+
+  // Ensure uniqueness across combined (in case inputs overlap) by canonical key
+  const uniqMap = new Map();
+  combined.forEach(p => {
+    const k = cfgToKey(p.cfg);
+    if(!uniqMap.has(k)) uniqMap.set(k, p);
+  });
+  const patterns = Array.from(uniqMap.values());
+  renderThumbs(patterns, N);
+});
+
+/* ---------- サムネイル描画（最長優先・バッチ化・負荷検知） ---------- */
+function renderThumbs(patterns, N){
+  thumbs.innerHTML='';
+  if(!patterns || patterns.length===0){ thumbs.textContent='有効なパターンはありません。'; return; }
+
+  // ensure patterns are unique by key (should already be)
+  const uniq = new Map();
+  patterns.forEach(p => { uniq.set(cfgToKey(p.cfg), p); });
+  const list = Array.from(uniq.values());
+
+  const maxLen = Math.max(...list.map(p=>p.path.length));
+  const longestIndex = list.findIndex(p=>p.path.length===maxLen);
+  if(longestIndex > 0){
+    const [lp] = list.splice(longestIndex,1);
+    list.unshift(lp);
+  }
+
+  const showCount = Math.min(200, list.length);
+  const finalList = list.slice(0, showCount);
+
+  let i=0;
+  const batchSize = 8;
+  const startTime = performance.now();
+  const maxAllowed = 2000;
+
+  async function drawBatch(){
+    for(let b=0; b<batchSize && i<finalList.length; b++, i++){
+      const item = finalList[i];
+      const div = document.createElement('div'); div.className='thumb';
+      const canvas = document.createElement('canvas'); canvas.width=120; canvas.height=120; div.appendChild(canvas);
+      const info = document.createElement('div'); info.className='small';
+      info.textContent = `入 ${ (item.inputIndex!=null ? (item.inputIndex+1)+' → ' : '') }出 ${String.fromCharCode(65 + (item.exitRow ?? 0))} / ${item.path.length}${item.path.length===maxLen ? ' ⭐最長' : ''}`;
+      div.appendChild(info);
+      thumbs.appendChild(div);
+
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0,0,120,120);
+      ctx.strokeStyle = '#ccc'; ctx.lineWidth=0.6;
+      const cell = 120 / Math.max(1,N);
+      for(let r=0;r<N;r++) for(let c=0;c<N;c++){
+        const m = item.cfg[r*N+c];
+        if(m===1||m===2){
+          ctx.beginPath();
+          if(m===1){ ctx.moveTo((c+1)*cell-2, r*cell+2); ctx.lineTo(c*cell+2, (r+1)*cell-2); }
+          else { ctx.moveTo(c*cell+2, r*cell+2); ctx.lineTo((c+1)*cell-2, (r+1)*cell-2); }
+          ctx.stroke();
+        }
+      }
+      ctx.strokeStyle='#d33'; ctx.lineWidth=1.4; ctx.beginPath();
+      const step = Math.max(1, Math.floor(item.path.length / 200));
+      let moved=false;
+      item.path.forEach(([r,c], idx)=>{ if(idx%step!==0) return; const x=c*cell+cell/2, y=r*cell+cell/2; if(!moved){ctx.moveTo(x,y); moved=true;} else ctx.lineTo(x,y); });
+      ctx.stroke();
+      div.addEventListener('click', ()=> drawGrid(N, item.cfg, item.path));
+    }
+
+    if(performance.now() - startTime > maxAllowed){
+      thumbs.innerHTML = '💡 描画負荷が高いため、最長経路のみを表示します。';
+      const first = finalList[0];
+      if(first) drawGrid(N, first.cfg, first.path);
+      return;
+    }
+
+    if(i < finalList.length){
+      await new Promise(r=>setTimeout(r,12));
+      requestAnimationFrame(drawBatch);
+    } else {
+      // finished; draw longest in main canvas
+      const first = finalList[0];
+      if(first) drawGrid(N, first.cfg, first.path);
+    }
+  }
+
+  drawBatch();
+}
+</script>
+</body>
+</html>
