@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>格子ミラー 統合（探索 + サンドボックス）</title>
+<title>格子ミラー 統合（高速DFS探索 + サンドボックス）</title>
 <style>
   body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;padding:18px}
   .tabs{display:flex;gap:8px;margin-bottom:12px}
@@ -32,7 +32,7 @@
 </style>
 </head>
 <body>
-  <h2>格子ミラー — 統合（探索モード / サンドボックス）</h2>
+  <h2>格子ミラー — 統合（高速DFS探索 / サンドボックス）</h2>
 
   <div class="tabs">
     <div class="tab active" data-target="explorer">探索モード (Explorer)</div>
@@ -40,16 +40,15 @@
   </div>
 
   <div class="panel-wrap">
-    <!-- 探索モード -->
     <div id="explorer" class="section active">
       <details>
         <summary>🔍 探索モード・パラメータの説明</summary>
-        <p><b>完全探索：</b> すべての鏡配置を試して canonical 単位で数えます（重い処理）。</p>
-        <p><b>近似：</b> ランダム/ハイブリッドでサンプリングして異なる経路数から推定します。</p>
+        <p><b>完全探索（DFS）：</b> 光線追跡型の深さ優先探索により、5×5などの大きなグリッドでも高速に全 canonical パターンを割り出します。</p>
+        <p><b>近似：</b> ランダム/ハイブリッドでサンプリングして異なる経路数から推定します（6×6以上の巨大な盤面用）。</p>
       </details>
 
       <div class="controls">
-        <label>グリッドサイズ: <input id="exp_sizeInput" type="number" min="1" max="10" value="3" /></label>
+        <label>グリッドサイズ: <input id="exp_sizeInput" type="number" min="1" max="10" value="5" /></label>
         <label>入射位置（下から）: <select id="exp_inputSelect"></select></label>
       </div>
 
@@ -76,7 +75,6 @@
       <div id="exp_thumbs"></div>
     </div>
 
-    <!-- サンドボックスモード -->
     <div id="sandbox" class="section">
       <div class="controls">
         <label>グリッド N: <input id="sb_sizeInput" type="number" min="1" value="5" style="width:70px"></label>
@@ -132,10 +130,8 @@ const cfgToKey = cfg => cfg.join(',');
 
 /* =========================
    探索モード (Explorer)
-   名前空間： EXP
    ========================= */
 const EXP = (function(){
-  // DOM
   const sizeInput = document.getElementById('exp_sizeInput');
   const inputSelect = document.getElementById('exp_inputSelect');
   const runBtn = document.getElementById('exp_runBtn');
@@ -148,7 +144,7 @@ const EXP = (function(){
   const thumbs = document.getElementById('exp_thumbs');
   const progressSpan = document.getElementById('exp_progress');
 
-  // simulate is slightly different name to avoid conflicts
+  // サンドボックス・近似探索用
   function simulate_local(N, mirrorConfig, startInput){
     let r=N-1, c=startInput, dir=0; const path=[];
     const MAX_STEPS = 10000;
@@ -172,42 +168,90 @@ const EXP = (function(){
     return newCfg;
   }
 
-  function fullEnumerate(N, startInput){
+  // ★変更点: DFS (光線追跡型バックトラッキング) による完全探索
+  function dfsEnumerate(N, startInput) {
     const seen = new Map();
-    let longest = 0, best = null;
-    const total = Math.pow(3, N*N);
-    for(let t=0; t<total; t++){
-      let x=t;
-      const cfg = new Array(N*N);
-      for(let i=0;i<N*N;i++){ cfg[i] = x % 3; x = Math.floor(x/3); }
-      const res = simulate_local(N, cfg, startInput);
-      if(res.exited && res.exitSide === 'R'){
-        const canon = canonicalizeConfig(N, cfg, res.path);
-        const key = cfgToKey(canon);
-        if(!seen.has(key)){
-          seen.set(key, { cfg: canon, path: res.path.slice(), exitRow: res.exitRow });
-          if(res.path.length > longest){
-            longest = res.path.length;
-            best = { cfg: canon.slice(), path: res.path.slice(), exitRow: res.exitRow };
+    let longest = 0;
+    let best = null;
+
+    const grid = new Array(N * N).fill(-1);
+    const history = new Uint8Array(N * N * 4); // 状態管理用 (高速な型付き配列)
+    const currentPath = [];
+
+    function explore(r, c, dir) {
+      // 1. 盤面外に出たか判定
+      if (r < 0 || r >= N || c < 0 || c >= N) {
+        if (c === N && r >= 0 && r < N) {
+          // 右辺から抜けた場合: canonicalに変換して記録
+          const canon = grid.map(v => v === -1 ? 0 : v);
+          const key = cfgToKey(canon);
+          if (!seen.has(key)) {
+            const pathCopy = currentPath.slice();
+            seen.set(key, { cfg: canon, path: pathCopy, exitRow: r });
+            if (pathCopy.length > longest) {
+              longest = pathCopy.length;
+              best = { cfg: canon.slice(), path: pathCopy.slice(), exitRow: r };
+            }
           }
         }
+        return;
+      }
+
+      // 2. ループ検知
+      const stateIdx = (r * N + c) * 4 + dir;
+      if (history[stateIdx] === 1) return; 
+      history[stateIdx] = 1;
+      currentPath.push([r, c]);
+
+      const cellIdx = r * N + c;
+      const currentMirror = grid[cellIdx];
+
+      // 3. すでにマスが決定済みならそのまま反射
+      if (currentMirror !== -1) {
+        const nDir = reflect(dir, currentMirror);
+        const [nr, nc] = stepCell(r, c, nDir);
+        explore(nr, nc, nDir);
+      } 
+      // 4. 未知のマスなら3通り試す
+      else {
+        for (let m = 0; m <= 2; m++) {
+          grid[cellIdx] = m;
+          const nDir = reflect(dir, m);
+          const [nr, nc] = stepCell(r, c, nDir);
+          explore(nr, nc, nDir);
+          grid[cellIdx] = -1; // バックトラック
+        }
+      }
+
+      // 探索終了処理
+      currentPath.pop();
+      history[stateIdx] = 0;
+    }
+
+    // 最初の一歩 (一番下の行の startInput 列から上向き(dir:0)に進む)
+    explore(N - 1, startInput, 0);
+
+    const patterns = [...seen.values()];
+    if (best) {
+      const bestKey = cfgToKey(best.cfg);
+      const idx = patterns.findIndex(p => cfgToKey(p.cfg) === bestKey);
+      if (idx > 0) {
+        const p = patterns.splice(idx, 1)[0];
+        patterns.unshift(p);
+      } else if (idx === -1) {
+        patterns.unshift(best);
       }
     }
-    const patterns = [...seen.values()];
-    if(best){
-      const bestKey = cfgToKey(best.cfg);
-      const idx = patterns.findIndex(p=>cfgToKey(p.cfg)===bestKey);
-      if(idx>0){ const p = patterns.splice(idx,1)[0]; patterns.unshift(p); }
-      else if(idx===-1) patterns.unshift(best);
-    }
-    return { count: seen.size, patterns, longest, totalConfigs: total };
+    return { count: seen.size, patterns, longest };
   }
 
+  // 近似探索はそのまま維持
   async function approximateEnumerate(N, startInput, depthLimit, maxSamples, isHybrid, progressCb){
-    if(N <= 3) {
-      const res = fullEnumerate(N, startInput);
+    // N <= 5 は高速DFSで一瞬なので強制的に完全探索に回す
+    if(N <= 5) {
+      const res = dfsEnumerate(N, startInput);
       if(progressCb) progressCb(1,1);
-      return { estimatedCount: res.count, patterns: res.patterns, longest: res.longest, totalConfigs: res.totalConfigs };
+      return { estimatedCount: res.count, patterns: res.patterns, longest: res.longest };
     }
     const seen = new Map();
     let longest = 0, best = null;
@@ -253,10 +297,9 @@ const EXP = (function(){
       if(idx>0){ const p = patterns.splice(idx,1)[0]; patterns.unshift(p); }
       else if(idx===-1) patterns.unshift(best);
     }
-    return { estimatedCount, patterns, longest, totalConfigs: total };
+    return { estimatedCount, patterns, longest };
   }
 
-  // UI helpers (drawer for grids)
   function drawGrid(N, cfg, path){
     canvasWrap.innerHTML = '';
     const svgNS='http://www.w3.org/2000/svg';
@@ -285,7 +328,6 @@ const EXP = (function(){
     canvasWrap.appendChild(svg);
   }
 
-  // run handler
   runBtn.addEventListener('click', async ()=>{
     const N = parseInt(sizeInput.value,10);
     const mode = modeSelect.value;
@@ -294,14 +336,16 @@ const EXP = (function(){
     const depthLimit = parseInt(depthInput.value,10);
     const isHybrid = (mode==='hybrid');
     const preferExact = forceExact.checked;
-    const autoExact = N <= 3;
+    
+    // ★ 5×5以下は一瞬で終わるので自動で完全探索
+    const autoExact = N <= 5;
     const doExact = preferExact || autoExact;
 
     thumbs.innerHTML=''; canvasWrap.innerHTML=''; progressSpan.textContent='';
 
-    const totalConfigs = Math.pow(3, N*N);
-    if(doExact && totalConfigs > 200000){
-      if(!confirm(`完全探索を選択しています。\nN=${N} の全配置数は ${totalConfigs.toLocaleString()} です。\nブラウザで長時間かかる可能性があります。続行しますか？`)){
+    // 6×6以上で完全探索しようとした場合の警告
+    if(doExact && N >= 6){
+      if(!confirm(`完全探索を選択しています。\nN=${N} の完全探索（DFS）はパターン数が膨大になり、ブラウザに負荷がかかる可能性があります。続行しますか？`)){
         resultSummary.textContent='キャンセルされました。';
         return;
       }
@@ -314,9 +358,13 @@ const EXP = (function(){
     for(let sIdx=0; sIdx<inputs.length; sIdx++){
       const s = inputs[sIdx];
       progressSpan.textContent = `入力 ${s+1} を計算中...`;
+      
+      // UIを描画させるための短いウェイト
+      await new Promise(r => setTimeout(r, 10));
+
       let res;
       if(doExact){
-        res = fullEnumerate(N, s);
+        res = dfsEnumerate(N, s); // ★ DFS関数を呼び出し
         totalCount += res.count;
       } else {
         res = await approximateEnumerate(N, s, depthLimit, maxSamples, isHybrid, (done, total)=> {
@@ -329,8 +377,8 @@ const EXP = (function(){
     }
 
     progressSpan.textContent = '';
-    resultSummary.innerHTML = `<b>${ inputVal === 'all' ? '全体' : '個別' }（${doExact ? '完全探索' : '近似'}）</b><br>` +
-      (doExact ? `有効パターン数（正確）: ${totalCount}` : `推定有効パターン数: 約${totalCount}`) +
+    resultSummary.innerHTML = `<b>${ inputVal === 'all' ? '全体' : '個別' }（${doExact ? '完全探索: DFS' : '近似'}）</b><br>` +
+      (doExact ? `有効パターン数（正確）: <strong>${totalCount}</strong>` : `推定有効パターン数: 約${totalCount}`) +
       `<br>発見された最長経路マス数: ${overallLongest}`;
 
     const uniqMap = new Map();
@@ -342,7 +390,6 @@ const EXP = (function(){
     renderThumbs(patterns, N);
   });
 
-  // input options
   function updateInputOptions(){
     const N = parseInt(sizeInput.value,10);
     inputSelect.innerHTML='';
@@ -352,7 +399,6 @@ const EXP = (function(){
   updateInputOptions();
   sizeInput.addEventListener('change', updateInputOptions);
 
-  // thumbnails
   function renderThumbs(patterns, N){
     thumbs.innerHTML='';
     if(!patterns || patterns.length===0){ thumbs.textContent='有効なパターンはありません。'; return; }
@@ -365,6 +411,7 @@ const EXP = (function(){
     const showCount = Math.min(200, list.length);
     const finalList = list.slice(0, showCount);
     let i=0; const batchSize=8; const startTime = performance.now(); const maxAllowed=2000;
+    
     async function drawBatch(){
       for(let b=0; b<batchSize && i<finalList.length; b++, i++){
         const item = finalList[i];
@@ -411,20 +458,14 @@ const EXP = (function(){
     drawBatch();
   }
 
-  // export API for use by outer scope if needed
-  return {
-    simulate_local,
-    fullEnumerate,
-    approximateEnumerate
-  };
+  return { dfsEnumerate, approximateEnumerate };
 })();
 
 /* =========================
    サンドボックスモード (Sandbox)
-   名前空間： SB
+   ※変更なし
    ========================= */
 const SB = (function(){
-  // DOM references (sandbox-specific)
   const sizeInput = document.getElementById('sb_sizeInput');
   const simMode = document.getElementById('sb_simMode');
   const simulateBtn = document.getElementById('sb_simulateBtn');
@@ -434,7 +475,6 @@ const SB = (function(){
   const mappingContent = document.getElementById('mappingContent');
   const legendDiv = document.getElementById('legend');
 
-  // state
   let N = 5, cfg = [], inputsBottom = [], inputsLeft = [];
 
   function simulateSingle(N,cfg,startR,startC,startDir){
@@ -492,7 +532,6 @@ const SB = (function(){
     svg.setAttribute('height', h);
     svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
 
-    // grid cells
     for(let r=0;r<N;r++){
       for(let c=0;c<N;c++){
         const x = c*CELL + MARGIN;
@@ -517,7 +556,6 @@ const SB = (function(){
       }
     }
 
-    // bottom markers
     for(let c=0;c<N;c++){
       const cx = MARGIN + c*CELL + CELL/2;
       const cy = MARGIN + N*CELL + 20;
@@ -537,7 +575,6 @@ const SB = (function(){
       }
     }
 
-    // left markers
     for(let r=0;r<N;r++){
       const cx = MARGIN - 20;
       const cy = MARGIN + r*CELL + CELL/2;
@@ -569,17 +606,14 @@ const SB = (function(){
   function handleClick(x,y,svg){
     const CELL = 48;
     const MARGIN = 60;
-    // bottom markers
     for(const el of svg.querySelectorAll('circle[data-bottom]')){
       const cx = parseFloat(el.getAttribute('cx')), cy = parseFloat(el.getAttribute('cy'));
       if(Math.hypot(cx-x, cy-y) <= 10){ const c = parseInt(el.dataset.bottom, 10); inputsBottom[c] = !inputsBottom[c]; renderBoard(); return; }
     }
-    // left markers
     for(const el of svg.querySelectorAll('circle[data-left]')){
       const cx = parseFloat(el.getAttribute('cx')), cy = parseFloat(el.getAttribute('cy'));
       if(Math.hypot(cx-x, cy-y) <= 10){ const r = parseInt(el.dataset.left, 10); inputsLeft[r] = !inputsLeft[r]; renderBoard(); return; }
     }
-    // cells
     const gx = x - MARGIN, gy = y - MARGIN;
     const c = Math.floor(gx / CELL), r = Math.floor(gy / CELL);
     if(r >= 0 && r < N && c >= 0 && c < N){ cfg[r*N + c] = (cfg[r*N + c] + 1) % 3; renderBoard(); }
@@ -651,13 +685,9 @@ const SB = (function(){
   });
   resetBtn.addEventListener('click', ()=>{ if(confirm('盤面を初期化しますか？')) initState(); });
 
-  // init
   initState();
 
-  // expose simulate for external use if needed
-  return {
-    simulateSingle
-  };
+  return { simulateSingle };
 })();
 
 /* =========================
@@ -671,9 +701,6 @@ const SB = (function(){
     const tgt = t.dataset.target;
     document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
     document.getElementById(tgt).classList.add('active');
-    // optional: when switching to sandbox, trigger a render in case size changed externally
-    if(tgt === 'sandbox'){ /* SB already manages its own rendering */ }
-    if(tgt === 'explorer'){ /* EXP manages its own UI */ }
   }));
 })();
 </script>
