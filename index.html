@@ -85,6 +85,10 @@
             <option value="both">両方（同時）</option>
           </select>
         </label>
+        <label>アニメ速度: 
+          <input id="sb_speedSlider" type="range" min="0.1" max="5.0" step="0.1" value="1.5" style="width:70px; vertical-align:middle;">
+          <span id="sb_speedDisp" class="small">1.5s</span>
+        </label>
         <button id="sb_simulateBtn">光を追跡</button>
         <button id="sb_resetBtn">リセット</button>
       </div>
@@ -144,7 +148,6 @@ const EXP = (function(){
   const thumbs = document.getElementById('exp_thumbs');
   const progressSpan = document.getElementById('exp_progress');
 
-  // 近似探索用シミュレーション
   function simulate_local(N, mirrorConfig, startInput){
     let r=N-1, c=startInput, dir=0; const path=[];
     const MAX_STEPS = 10000;
@@ -168,39 +171,29 @@ const EXP = (function(){
     return newCfg;
   }
 
-  // ★ Generator関数を使った非同期DFS（フリーズ完全回避・メモリ節約版）
   async function dfsEnumerateAsync(N, startInput, progressCb) {
-    let totalCount = 0; // 重複チェック不要でカウントのみ
+    let totalCount = 0; 
     let longest = 0;
     let best = null;
     let counter = 0;
-    
-    // ★ メモリ不足対策：保存するパターン数に上限を設ける
     const MAX_KEEP = 2000; 
     const savedPatterns = [];
-
     const grid = new Array(N * N).fill(-1);
     const history = new Uint8Array(N * N * 4); 
     const currentPath = [];
 
     function* exploreGen(r, c, dir) {
-      // 10万ノード探索するごとに一時停止してカウンターを返す（UI更新用）
       if (++counter % 100000 === 0) yield counter;
 
       if (r < 0 || r >= N || c < 0 || c >= N) {
         if (c === N && r >= 0 && r < N) {
-          // DFSの性質上、生成されるパターンはすべてユニークになるため単純にカウント
           totalCount++;
           const pathLen = currentPath.length;
-
-          // 最長経路の更新
           if (pathLen > longest) {
             longest = pathLen;
             const canon = grid.map(v => v === -1 ? 0 : v);
             best = { cfg: canon, path: currentPath.slice(), exitRow: r };
           }
-
-          // ★ 上限に達するまでは表示用に保存
           if (savedPatterns.length < MAX_KEEP) {
             const canon = grid.map(v => v === -1 ? 0 : v);
             savedPatterns.push({ cfg: canon, path: currentPath.slice(), exitRow: r });
@@ -227,21 +220,18 @@ const EXP = (function(){
           const nDir = reflect(dir, m);
           const [nr, nc] = stepCell(r, c, nDir);
           yield* exploreGen(nr, nc, nDir);
-          grid[cellIdx] = -1; // バックトラック
+          grid[cellIdx] = -1; 
         }
       }
-
       currentPath.pop();
       history[stateIdx] = 0;
     }
 
-    // 探索を実行しつつ、yield されたらブラウザを休ませる
     const gen = exploreGen(N - 1, startInput, 0);
     while (true) {
       const res = gen.next();
       if (res.done) break;
       if (progressCb) progressCb(res.value);
-      // メインスレッドを解放（ここでUIが更新される）
       await new Promise(resolve => setTimeout(resolve, 0));
     }
 
@@ -256,15 +246,11 @@ const EXP = (function(){
         patterns.unshift(best);
       }
     }
-    
-    // countに総数を返す
     return { count: totalCount, patterns, longest };
   }
 
-  // 近似探索（6×6以上の盤面用）
   async function approximateEnumerate(N, startInput, depthLimit, maxSamples, isHybrid, progressCb){
     if(N <= 5) {
-      // 安全のため、ここに入ってしまっても非同期DFSを呼ぶ
       return await dfsEnumerateAsync(N, startInput, (count) => {
         if (progressCb) progressCb(count, "DFS");
       });
@@ -344,7 +330,6 @@ const EXP = (function(){
     canvasWrap.appendChild(svg);
   }
 
-  // ★ 実行ボタンの処理
   runBtn.addEventListener('click', async ()=>{
     const N = parseInt(sizeInput.value,10);
     const mode = modeSelect.value;
@@ -353,8 +338,6 @@ const EXP = (function(){
     const depthLimit = parseInt(depthInput.value,10);
     const isHybrid = (mode==='hybrid');
     const preferExact = forceExact.checked;
-    
-    // 5×5以下は自動で完全探索
     const autoExact = N <= 5;
     const doExact = preferExact || autoExact;
 
@@ -374,12 +357,10 @@ const EXP = (function(){
     for(let sIdx=0; sIdx<inputs.length; sIdx++){
       const s = inputs[sIdx];
       progressSpan.textContent = `入力 ${s+1} を計算準備中...`;
-      
       await new Promise(r => setTimeout(r, 10));
 
       let res;
       if(doExact){
-        // ★ 非同期DFSの呼び出し
         res = await dfsEnumerateAsync(N, s, (nodesCount) => {
           progressSpan.textContent = `入力 ${s+1} を計算中... (探索ノード: ${nodesCount.toLocaleString()}回)`;
         });
@@ -495,8 +476,17 @@ const SB = (function(){
   const statsBox = document.getElementById('statContent');
   const mappingContent = document.getElementById('mappingContent');
   const legendDiv = document.getElementById('legend');
+  
+  const speedSlider = document.getElementById('sb_speedSlider');
+  const speedDisp = document.getElementById('sb_speedDisp');
+  if(speedSlider && speedDisp){
+    speedSlider.addEventListener('input', () => {
+      speedDisp.textContent = Number(speedSlider.value).toFixed(1) + 's';
+    });
+  }
 
   let N = 5, cfg = [], inputsBottom = [], inputsLeft = [];
+  let animTimeouts = []; 
 
   function simulateSingle(N,cfg,startR,startC,startDir){
     let r=startR, c=startC, dir=startDir;
@@ -655,18 +645,43 @@ const SB = (function(){
 
   function drawSimulation(results){
     const svg = boardWrap.querySelector('svg'); if(!svg) return;
+    
     svg.querySelectorAll('[data-overlay]').forEach(e => e.remove());
+    animTimeouts.forEach(clearTimeout);
+    animTimeouts = [];
+
     const CELL = 48;
     const MARGIN = 60;
+    const duration = speedSlider ? parseFloat(speedSlider.value) : 1.5;
+
     for(let i=0;i<results.length;i++){
       const entry = results[i];
       const res = entry.res;
       const color = COLORS[i % COLORS.length];
+      
       if(res.path && res.path.length > 0){
-        const pts = res.path.map(([r,c]) => `${MARGIN + c*CELL + CELL/2},${MARGIN + r*CELL + CELL/2}`).join(' ');
-        const poly = document.createElementNS('http://www.w3.org/2000/svg','polyline');
-        poly.setAttribute('points', pts); poly.setAttribute('fill', 'none'); poly.setAttribute('stroke', color);
-        poly.setAttribute('stroke-width', 3); poly.setAttribute('stroke-linecap', 'round'); poly.setAttribute('data-overlay', '1'); svg.appendChild(poly);
+        const pathData = res.path.map(([r,c], idx) => 
+          `${idx === 0 ? 'M' : 'L'} ${MARGIN + c*CELL + CELL/2} ${MARGIN + r*CELL + CELL/2}`
+        ).join(' ');
+
+        const pathEl = document.createElementNS('http://www.w3.org/2000/svg','path');
+        pathEl.setAttribute('d', pathData); 
+        pathEl.setAttribute('fill', 'none'); 
+        pathEl.setAttribute('stroke', color);
+        pathEl.setAttribute('stroke-width', 3); 
+        pathEl.setAttribute('stroke-linecap', 'round'); 
+        pathEl.setAttribute('stroke-linejoin', 'round');
+        pathEl.setAttribute('data-overlay', '1'); 
+        svg.appendChild(pathEl);
+
+        const length = pathEl.getTotalLength();
+        pathEl.style.strokeDasharray = length;
+        pathEl.style.strokeDashoffset = length;
+        
+        pathEl.getBoundingClientRect(); 
+        
+        pathEl.style.transition = `stroke-dashoffset ${duration}s linear`;
+        pathEl.style.strokeDashoffset = '0';
 
         if(res.exited){
           let exx, exy; const gap = 18;
@@ -681,7 +696,15 @@ const SB = (function(){
           et.setAttribute('font-size', 18); et.setAttribute('font-weight', 'bold');
           et.setAttribute('fill', '#000'); et.setAttribute('stroke', '#fff'); et.setAttribute('stroke-width', 3);
           et.setAttribute('paint-order', 'stroke'); et.setAttribute('text-anchor', 'middle'); et.setAttribute('dominant-baseline', 'middle');
-          et.setAttribute('data-overlay', '1'); svg.appendChild(et);
+          et.setAttribute('data-overlay', '1'); 
+          et.style.opacity = '0';
+          et.style.transition = 'opacity 0.3s ease';
+          svg.appendChild(et);
+
+          const tid = setTimeout(() => {
+            et.style.opacity = '1';
+          }, duration * 1000);
+          animTimeouts.push(tid);
         }
       }
     }
