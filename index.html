@@ -33,7 +33,9 @@
   /* 内訳表示用 */
   .stats-board{margin-top:8px; padding:10px; background:#f0f8ff; border:1px solid #cce0ff; border-radius:6px; font-size:0.95em; display:none}
   .stats-tags{display:flex; flex-wrap:wrap; gap:8px; margin-top:6px}
-  .stats-tag{background:#fff; border:1px solid #b3d4ff; padding:2px 8px; border-radius:12px; font-size:0.9em; color:#0055cc}
+  .stats-tag{background:#fff; border:1px solid #b3d4ff; padding:4px 10px; border-radius:16px; font-size:0.9em; color:#0055cc; cursor:pointer; transition:all 0.2s; user-select:none}
+  .stats-tag:hover{background:#e6f2ff}
+  .stats-tag.active{background:#0055cc; color:#fff; border-color:#0055cc; font-weight:bold}
 </style>
 </head>
 <body>
@@ -155,6 +157,8 @@ const EXP = (function(){
   const thumbs = document.getElementById('exp_thumbs');
   const progressSpan = document.getElementById('exp_progress');
 
+  let currentRenderId = 0; // 描画処理の競合を防ぐためのID
+
   function simulate_local(N, mirrorConfig, startInput){
     let r=N-1, c=startInput, dir=0; const path=[];
     const MAX_STEPS = 10000;
@@ -188,7 +192,7 @@ const EXP = (function(){
     const grid = new Array(N * N).fill(-1);
     const history = new Uint8Array(N * N * 4); 
     const currentPath = [];
-    const mStats = {}; // 探索中にリアルタイムで鏡の数を集計
+    const mStats = {}; 
 
     function* exploreGen(r, c, dir) {
       if (++counter % 100000 === 0) yield counter;
@@ -197,13 +201,11 @@ const EXP = (function(){
         if (c === N && r >= 0 && r < N) {
           totalCount++;
           
-          // --- メモリ制限に関係なく、全件の鏡の数を集計 ---
           let mCount = 0;
           for(let i=0; i<grid.length; i++){
             if(grid[i] === 1 || grid[i] === 2) mCount++;
           }
           mStats[mCount] = (mStats[mCount] || 0) + 1;
-          // ------------------------------------------------
 
           const pathLen = currentPath.length;
           if (pathLen > longest) {
@@ -211,7 +213,6 @@ const EXP = (function(){
             const canon = grid.map(v => v === -1 ? 0 : v);
             best = { cfg: canon, path: currentPath.slice(), exitRow: r };
           }
-          // 保存用データはブラウザ負荷対策で上限を設ける
           if (savedPatterns.length < MAX_KEEP) {
             const canon = grid.map(v => v === -1 ? 0 : v);
             savedPatterns.push({ cfg: canon, path: currentPath.slice(), exitRow: r });
@@ -264,7 +265,7 @@ const EXP = (function(){
         patterns.unshift(best);
       }
     }
-    return { count: totalCount, patterns, longest, mStats }; // 全件集計データを返す
+    return { count: totalCount, patterns, longest, mStats };
   }
 
   async function approximateEnumerate(N, startInput, depthLimit, maxSamples, isHybrid, progressCb){
@@ -312,7 +313,6 @@ const EXP = (function(){
     const total = Math.pow(3, N*N);
     const factor = total / Math.max(1, maxSamples);
     
-    // サンプリングに基づく推定内訳の算出
     const mStatsRaw = {};
     for(const p of seen.values()){
       const mCount = p.cfg.filter(m => m !== 0).length;
@@ -374,6 +374,9 @@ const EXP = (function(){
     const autoExact = N <= 5;
     const doExact = preferExact || autoExact;
 
+    // 前回の描画をキャンセル
+    currentRenderId++;
+    
     thumbs.innerHTML=''; canvasWrap.innerHTML=''; progressSpan.textContent='';
     mirrorStats.style.display = 'none'; mirrorStats.innerHTML = '';
 
@@ -386,7 +389,7 @@ const EXP = (function(){
 
     resultSummary.textContent = doExact ? '完全探索中...' : '探索中...';
     let combined = [], totalCount = 0, overallLongest = 0;
-    let globalMStats = {}; // 全入力の集計を統合
+    let globalMStats = {};
 
     const inputs = (inputVal === 'all') ? [...Array(N).keys()] : [parseInt(inputVal,10)];
 
@@ -422,27 +425,50 @@ const EXP = (function(){
       (doExact ? `有効パターン数（正確）: <strong>${totalCount}</strong>` : `推定有効パターン数: 約${totalCount}`) +
       `<br>発見された最長経路マス数: ${overallLongest}`;
 
-    // 集計結果（裏で完全カウントしたもの）のHTML構築
-    let statsHtml = `<b>💡 発見された有効パターンの内訳</b>（計 ${totalCount} 件）<br>`;
-    if(!doExact) {
-      statsHtml = `<b>💡 サンプリングによる推定内訳</b>（計 約${totalCount} 件）<br>`;
-    }
-    statsHtml += `<div class="stats-tags">`;
-    const sortedKeys = Object.keys(globalMStats).map(Number).sort((a,b)=>a-b);
-    sortedKeys.forEach(k => {
-      statsHtml += `<span class="stats-tag">鏡 <b>${k}</b> 枚： ${globalMStats[k]} 件</span>`;
-    });
-    statsHtml += `</div>`;
-    mirrorStats.innerHTML = statsHtml;
-    mirrorStats.style.display = 'block';
-
-    // 以下はUI描画用（重複除去済み・上限あり）
     const uniqMap = new Map();
     combined.forEach(p => {
       const k = cfgToKey(p.cfg);
       if(!uniqMap.has(k)) uniqMap.set(k, p);
     });
     const renderPatterns = Array.from(uniqMap.values());
+
+    // --- クリック可能な統計タグの構築 ---
+    let statsHtml = `<b>💡 鏡の枚数ごとの内訳</b>（タグをクリックしてパターンを絞り込み表示できます）<br>`;
+    mirrorStats.innerHTML = statsHtml;
+    
+    const tagsContainer = document.createElement('div');
+    tagsContainer.className = 'stats-tags';
+
+    const allBtn = document.createElement('span');
+    allBtn.className = 'stats-tag active';
+    allBtn.innerHTML = `すべて表示 (${renderPatterns.length}件)`;
+    allBtn.addEventListener('click', () => {
+      tagsContainer.querySelectorAll('.stats-tag').forEach(t => t.classList.remove('active'));
+      allBtn.classList.add('active');
+      renderThumbs(renderPatterns, N);
+    });
+    tagsContainer.appendChild(allBtn);
+
+    const sortedKeys = Object.keys(globalMStats).map(Number).sort((a,b)=>a-b);
+    sortedKeys.forEach(k => {
+      const btn = document.createElement('span');
+      btn.className = 'stats-tag';
+      // UI上に保持しているサンプル数（renderPatterns内の件数）も参考表示
+      const actualCount = renderPatterns.filter(p => p.cfg.filter(m => m !== 0).length === k).length;
+      btn.innerHTML = `鏡 <b>${k}</b> 枚： ${globalMStats[k]} 件 <span style="font-size:0.8em;opacity:0.8"></span>`;
+      
+      btn.addEventListener('click', () => {
+        tagsContainer.querySelectorAll('.stats-tag').forEach(t => t.classList.remove('active'));
+        btn.classList.add('active');
+        const filtered = renderPatterns.filter(p => p.cfg.filter(m => m !== 0).length === k);
+        renderThumbs(filtered, N);
+      });
+      tagsContainer.appendChild(btn);
+    });
+    
+    mirrorStats.appendChild(tagsContainer);
+    mirrorStats.style.display = 'block';
+
     renderThumbs(renderPatterns, N);
   });
 
@@ -456,10 +482,11 @@ const EXP = (function(){
   sizeInput.addEventListener('change', updateInputOptions);
 
   function renderThumbs(patterns, N){
+    const renderId = ++currentRenderId; // 描画処理用のIDを発行
     thumbs.innerHTML='';
-    if(!patterns || patterns.length===0){ thumbs.textContent='有効なパターンはありません。'; return; }
-    // すでにuniq化されているのでそのまま使用
-    const list = patterns; 
+    if(!patterns || patterns.length===0){ thumbs.textContent='この条件に合致する保存されたパターンはありません。'; return; }
+    
+    const list = patterns.slice(); 
     const maxLen = Math.max(...list.map(p=>p.path.length));
     const longestIndex = list.findIndex(p=>p.path.length===maxLen);
     if(longestIndex > 0){ const [lp] = list.splice(longestIndex,1); list.unshift(lp); }
@@ -468,9 +495,11 @@ const EXP = (function(){
     let i=0; const batchSize=8; const startTime = performance.now(); const maxAllowed=2000;
     
     async function drawBatch(){
+      if (renderId !== currentRenderId) return; // 別の描画処理が開始された場合は中止
+
       for(let b=0; b<batchSize && i<finalList.length; b++, i++){
         const item = finalList[i];
-        const mCount = item.cfg.filter(m => m !== 0).length; // 鏡の数を計算
+        const mCount = item.cfg.filter(m => m !== 0).length;
         const div = document.createElement('div'); div.className='thumb';
         const canvas = document.createElement('canvas'); canvas.width=120; canvas.height=120; div.appendChild(canvas);
         const info = document.createElement('div'); info.className='small';
@@ -498,7 +527,7 @@ const EXP = (function(){
         div.addEventListener('click', ()=> drawGrid(N, item.cfg, item.path));
       }
       if(performance.now() - startTime > maxAllowed){
-        thumbs.innerHTML += '<br>💡 描画負荷が高いため、表示を省略しました。';
+        thumbs.innerHTML += '<br>💡 描画負荷が高いため、以降の表示を省略しました。';
         const first = finalList[0];
         if(first) drawGrid(N, first.cfg, first.path);
         return;
