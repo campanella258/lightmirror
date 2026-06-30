@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>格子ミラー 統合（高速DFS探索 + サンドボックス）</title>
+<title>格子ミラー 統合（非同期DFS探索 + サンドボックス）</title>
 <style>
   body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;padding:18px}
   .tabs{display:flex;gap:8px;margin-bottom:12px}
@@ -32,7 +32,7 @@
 </style>
 </head>
 <body>
-  <h2>格子ミラー — 統合（高速DFS探索 / サンドボックス）</h2>
+  <h2>格子ミラー — 統合（非同期DFS探索 / サンドボックス）</h2>
 
   <div class="tabs">
     <div class="tab active" data-target="explorer">探索モード (Explorer)</div>
@@ -43,7 +43,7 @@
     <div id="explorer" class="section active">
       <details>
         <summary>🔍 探索モード・パラメータの説明</summary>
-        <p><b>完全探索（DFS）：</b> 光線追跡型の深さ優先探索により、5×5などの大きなグリッドでも高速に全 canonical パターンを割り出します。</p>
+        <p><b>完全探索（非同期DFS）：</b> 光線追跡型の深さ優先探索により全 canonical パターンを割り出します。計算途中でUIを更新するためフリーズしません。</p>
         <p><b>近似：</b> ランダム/ハイブリッドでサンプリングして異なる経路数から推定します（6×6以上の巨大な盤面用）。</p>
       </details>
 
@@ -144,7 +144,7 @@ const EXP = (function(){
   const thumbs = document.getElementById('exp_thumbs');
   const progressSpan = document.getElementById('exp_progress');
 
-  // サンドボックス・近似探索用
+  // 近似探索用シミュレーション
   function simulate_local(N, mirrorConfig, startInput){
     let r=N-1, c=startInput, dir=0; const path=[];
     const MAX_STEPS = 10000;
@@ -168,21 +168,23 @@ const EXP = (function(){
     return newCfg;
   }
 
-  // ★変更点: DFS (光線追跡型バックトラッキング) による完全探索
-  function dfsEnumerate(N, startInput) {
+  // ★ Generator関数を使った非同期DFS（フリーズ完全回避版）
+  async function dfsEnumerateAsync(N, startInput, progressCb) {
     const seen = new Map();
     let longest = 0;
     let best = null;
+    let counter = 0;
 
     const grid = new Array(N * N).fill(-1);
-    const history = new Uint8Array(N * N * 4); // 状態管理用 (高速な型付き配列)
+    const history = new Uint8Array(N * N * 4); 
     const currentPath = [];
 
-    function explore(r, c, dir) {
-      // 1. 盤面外に出たか判定
+    function* exploreGen(r, c, dir) {
+      // 10万ノード探索するごとに一時停止してカウンターを返す（UI更新用）
+      if (++counter % 100000 === 0) yield counter;
+
       if (r < 0 || r >= N || c < 0 || c >= N) {
         if (c === N && r >= 0 && r < N) {
-          // 右辺から抜けた場合: canonicalに変換して記録
           const canon = grid.map(v => v === -1 ? 0 : v);
           const key = cfgToKey(canon);
           if (!seen.has(key)) {
@@ -197,39 +199,41 @@ const EXP = (function(){
         return;
       }
 
-      // 2. ループ検知
       const stateIdx = (r * N + c) * 4 + dir;
-      if (history[stateIdx] === 1) return; 
+      if (history[stateIdx] === 1) return;
       history[stateIdx] = 1;
       currentPath.push([r, c]);
 
       const cellIdx = r * N + c;
       const currentMirror = grid[cellIdx];
 
-      // 3. すでにマスが決定済みならそのまま反射
       if (currentMirror !== -1) {
         const nDir = reflect(dir, currentMirror);
         const [nr, nc] = stepCell(r, c, nDir);
-        explore(nr, nc, nDir);
-      } 
-      // 4. 未知のマスなら3通り試す
-      else {
+        yield* exploreGen(nr, nc, nDir);
+      } else {
         for (let m = 0; m <= 2; m++) {
           grid[cellIdx] = m;
           const nDir = reflect(dir, m);
           const [nr, nc] = stepCell(r, c, nDir);
-          explore(nr, nc, nDir);
+          yield* exploreGen(nr, nc, nDir);
           grid[cellIdx] = -1; // バックトラック
         }
       }
 
-      // 探索終了処理
       currentPath.pop();
       history[stateIdx] = 0;
     }
 
-    // 最初の一歩 (一番下の行の startInput 列から上向き(dir:0)に進む)
-    explore(N - 1, startInput, 0);
+    // 探索を実行しつつ、yield されたらブラウザを休ませる
+    const gen = exploreGen(N - 1, startInput, 0);
+    while (true) {
+      const res = gen.next();
+      if (res.done) break;
+      if (progressCb) progressCb(res.value);
+      // メインスレッドを解放（ここでUIが更新される）
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
 
     const patterns = [...seen.values()];
     if (best) {
@@ -245,13 +249,13 @@ const EXP = (function(){
     return { count: seen.size, patterns, longest };
   }
 
-  // 近似探索はそのまま維持
+  // 近似探索（6×6以上の盤面用）
   async function approximateEnumerate(N, startInput, depthLimit, maxSamples, isHybrid, progressCb){
-    // N <= 5 は高速DFSで一瞬なので強制的に完全探索に回す
     if(N <= 5) {
-      const res = dfsEnumerate(N, startInput);
-      if(progressCb) progressCb(1,1);
-      return { estimatedCount: res.count, patterns: res.patterns, longest: res.longest };
+      // 安全のため、ここに入ってしまっても非同期DFSを呼ぶ
+      return await dfsEnumerateAsync(N, startInput, (count) => {
+        if (progressCb) progressCb(count, "DFS");
+      });
     }
     const seen = new Map();
     let longest = 0, best = null;
@@ -328,6 +332,7 @@ const EXP = (function(){
     canvasWrap.appendChild(svg);
   }
 
+  // ★ 実行ボタンの処理
   runBtn.addEventListener('click', async ()=>{
     const N = parseInt(sizeInput.value,10);
     const mode = modeSelect.value;
@@ -337,15 +342,14 @@ const EXP = (function(){
     const isHybrid = (mode==='hybrid');
     const preferExact = forceExact.checked;
     
-    // ★ 5×5以下は一瞬で終わるので自動で完全探索
+    // 5×5以下は自動で完全探索
     const autoExact = N <= 5;
     const doExact = preferExact || autoExact;
 
     thumbs.innerHTML=''; canvasWrap.innerHTML=''; progressSpan.textContent='';
 
-    // 6×6以上で完全探索しようとした場合の警告
     if(doExact && N >= 6){
-      if(!confirm(`完全探索を選択しています。\nN=${N} の完全探索（DFS）はパターン数が膨大になり、ブラウザに負荷がかかる可能性があります。続行しますか？`)){
+      if(!confirm(`完全探索を選択しています。\nN=${N} の完全探索は計算量が膨大になり、時間がかかる可能性があります。続行しますか？`)){
         resultSummary.textContent='キャンセルされました。';
         return;
       }
@@ -357,18 +361,24 @@ const EXP = (function(){
 
     for(let sIdx=0; sIdx<inputs.length; sIdx++){
       const s = inputs[sIdx];
-      progressSpan.textContent = `入力 ${s+1} を計算中...`;
+      progressSpan.textContent = `入力 ${s+1} を計算準備中...`;
       
-      // UIを描画させるための短いウェイト
       await new Promise(r => setTimeout(r, 10));
 
       let res;
       if(doExact){
-        res = dfsEnumerate(N, s); // ★ DFS関数を呼び出し
+        // ★ 非同期DFSの呼び出し
+        res = await dfsEnumerateAsync(N, s, (nodesCount) => {
+          progressSpan.textContent = `入力 ${s+1} を計算中... (探索ノード: ${nodesCount.toLocaleString()}回)`;
+        });
         totalCount += res.count;
       } else {
         res = await approximateEnumerate(N, s, depthLimit, maxSamples, isHybrid, (done, total)=> {
-          progressSpan.textContent = `入力 ${s+1}: ${done}/${total} サンプル`;
+          if (total === "DFS") {
+            progressSpan.textContent = `入力 ${s+1} を計算中... (探索ノード: ${done.toLocaleString()}回)`;
+          } else {
+            progressSpan.textContent = `入力 ${s+1}: ${done}/${total} サンプル`;
+          }
         });
         totalCount += (res.estimatedCount ?? 0);
       }
@@ -458,12 +468,11 @@ const EXP = (function(){
     drawBatch();
   }
 
-  return { dfsEnumerate, approximateEnumerate };
+  return { dfsEnumerateAsync, approximateEnumerate };
 })();
 
 /* =========================
    サンドボックスモード (Sandbox)
-   ※変更なし
    ========================= */
 const SB = (function(){
   const sizeInput = document.getElementById('sb_sizeInput');
