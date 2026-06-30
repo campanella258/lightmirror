@@ -55,7 +55,7 @@
       </details>
 
       <div class="controls">
-        <label>グリッドサイズ: <input id="exp_sizeInput" type="number" min="1" max="10" value="5" /></label>
+        <label>グリッドサイズ: <input id="exp_sizeInput" type="number" min="1" max="10" value="4" /></label>
         <label>入射位置（下から）: <select id="exp_inputSelect"></select></label>
       </div>
 
@@ -85,7 +85,7 @@
 
     <div id="sandbox" class="section">
       <div class="controls">
-        <label>グリッド N: <input id="sb_sizeInput" type="number" min="1" value="5" style="width:70px"></label>
+        <label>グリッド N: <input id="sb_sizeInput" type="number" min="1" value="4" style="width:70px"></label>
         <label>シミュレーション:
           <select id="sb_simMode">
             <option value="down">下 → 右</option>
@@ -187,8 +187,8 @@ const EXP = (function(){
     let longest = 0;
     let best = null;
     let counter = 0;
-    const MAX_KEEP = 2000; 
-    const savedPatterns = [];
+    const MAX_PER_MCOUNT = 200; // 鏡の枚数ごとに保存する最大数
+    const savedByMCount = {};
     const grid = new Array(N * N).fill(-1);
     const history = new Uint8Array(N * N * 4); 
     const currentPath = [];
@@ -213,9 +213,13 @@ const EXP = (function(){
             const canon = grid.map(v => v === -1 ? 0 : v);
             best = { cfg: canon, path: currentPath.slice(), exitRow: r };
           }
-          if (savedPatterns.length < MAX_KEEP) {
+          
+          if (!savedByMCount[mCount]) {
+            savedByMCount[mCount] = [];
+          }
+          if (savedByMCount[mCount].length < MAX_PER_MCOUNT) {
             const canon = grid.map(v => v === -1 ? 0 : v);
-            savedPatterns.push({ cfg: canon, path: currentPath.slice(), exitRow: r });
+            savedByMCount[mCount].push({ cfg: canon, path: currentPath.slice(), exitRow: r });
           }
         }
         return;
@@ -254,7 +258,11 @@ const EXP = (function(){
       await new Promise(resolve => setTimeout(resolve, 0));
     }
 
-    const patterns = savedPatterns;
+    const patterns = [];
+    for (const k in savedByMCount) {
+      patterns.push(...savedByMCount[k]);
+    }
+
     if (best) {
       const bestKey = cfgToKey(best.cfg);
       const idx = patterns.findIndex(p => cfgToKey(p.cfg) === bestKey);
@@ -274,10 +282,13 @@ const EXP = (function(){
         if (progressCb) progressCb(count, "DFS");
       });
     }
-    const seen = new Map();
+    const seenByMCount = {};
+    const MAX_PER_MCOUNT = 200;
+    const globalMStatsRaw = {};
+    
     let longest = 0, best = null;
     let current = new Array(N*N).fill(0);
-    const keepLimit = Math.min(5000, Math.max(200, Math.floor(maxSamples * 0.002)));
+    
     for(let s=0; s<maxSamples; s++){
       const cfg = isHybrid ? current.slice() : new Array(N*N).fill(0);
       for(let d=0; d<depthLimit; d++){
@@ -286,11 +297,17 @@ const EXP = (function(){
       const res = simulate_local(N, cfg, startInput);
       if(res.exited && res.exitSide==='R'){
         const canon = canonicalizeConfig(N, cfg, res.path);
+        const mCount = canon.filter(m => m !== 0).length;
+        globalMStatsRaw[mCount] = (globalMStatsRaw[mCount] || 0) + 1;
+        
         const key = cfgToKey(canon);
+        if(!seenByMCount[mCount]) seenByMCount[mCount] = new Map();
+        const seen = seenByMCount[mCount];
+        
         if(!seen.has(key)){
-          if(seen.size < keepLimit){
+          if(seen.size < MAX_PER_MCOUNT){
             seen.set(key, { cfg: canon, path: res.path.length>200 ? res.path.slice(0,200) : res.path.slice(), exitRow: res.exitRow });
-          } else if(Math.random() < 0.001){
+          } else if(Math.random() < 0.01){
             const keys = Array.from(seen.keys());
             const rem = keys[Math.floor(Math.random()*keys.length)];
             seen.delete(rem);
@@ -313,19 +330,18 @@ const EXP = (function(){
     const total = Math.pow(3, N*N);
     const factor = total / Math.max(1, maxSamples);
     
-    const mStatsRaw = {};
-    for(const p of seen.values()){
-      const mCount = p.cfg.filter(m => m !== 0).length;
-      mStatsRaw[mCount] = (mStatsRaw[mCount] || 0) + 1;
-    }
     const mStats = {};
     let finalEstimatedCount = 0;
-    for(const k in mStatsRaw){
-      mStats[k] = Math.round(mStatsRaw[k] * factor);
+    for(const k in globalMStatsRaw){
+      mStats[k] = Math.round(globalMStatsRaw[k] * factor);
       finalEstimatedCount += mStats[k];
     }
 
-    const patterns = [...seen.values()];
+    const patterns = [];
+    for(const k in seenByMCount) {
+      patterns.push(...seenByMCount[k].values());
+    }
+
     if(best){
       const bestKey = cfgToKey(best.cfg);
       const idx = patterns.findIndex(p=>cfgToKey(p.cfg)===bestKey);
@@ -441,7 +457,7 @@ const EXP = (function(){
 
     const allBtn = document.createElement('span');
     allBtn.className = 'stats-tag active';
-    allBtn.innerHTML = `すべて表示 (${renderPatterns.length}件)`;
+    allBtn.innerHTML = `すべて表示 (${renderPatterns.length}件表示中)`;
     allBtn.addEventListener('click', () => {
       tagsContainer.querySelectorAll('.stats-tag').forEach(t => t.classList.remove('active'));
       allBtn.classList.add('active');
@@ -455,7 +471,7 @@ const EXP = (function(){
       btn.className = 'stats-tag';
       // UI上に保持しているサンプル数（renderPatterns内の件数）も参考表示
       const actualCount = renderPatterns.filter(p => p.cfg.filter(m => m !== 0).length === k).length;
-      btn.innerHTML = `鏡 <b>${k}</b> 枚： ${globalMStats[k]} 件 <span style="font-size:0.8em;opacity:0.8"></span>`;
+      btn.innerHTML = `鏡 <b>${k}</b> 枚： ${globalMStats[k]} 件 <span style="font-size:0.8em;opacity:0.8">(表示中:${actualCount})</span>`;
       
       btn.addEventListener('click', () => {
         tagsContainer.querySelectorAll('.stats-tag').forEach(t => t.classList.remove('active'));
@@ -567,7 +583,7 @@ const SB = (function(){
     });
   }
 
-  let N = 5, cfg = [], inputsBottom = [], inputsLeft = [];
+  let N = 4, cfg = [], inputsBottom = [], inputsLeft = [];
   let animTimeouts = []; 
 
   function simulateSingle(N,cfg,startR,startC,startDir){
@@ -591,7 +607,7 @@ const SB = (function(){
   }
 
   function initState(){
-    N = Math.max(1, parseInt(sizeInput.value) || 5);
+    N = Math.max(1, parseInt(sizeInput.value) || 4);
     cfg = new Array(N*N).fill(0);
     inputsBottom = new Array(N).fill(false);
     inputsLeft = new Array(N).fill(false);
