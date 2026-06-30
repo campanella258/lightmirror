@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>格子ミラー 統合（非同期DFS探索 + サンドボックス + 一般式自動生成）</title>
+<title>格子ミラー 統合（非同期DFS探索 + サンドボックス）</title>
 <style>
   body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;padding:18px}
   .tabs{display:flex;gap:8px;margin-bottom:12px}
@@ -39,12 +39,11 @@
 </style>
 </head>
 <body>
-  <h2>格子ミラー — 統合（探索 / サンドボックス / 一般式自動生成）</h2>
+  <h2>格子ミラー — 統合（非同期DFS探索 / サンドボックス）</h2>
 
   <div class="tabs">
     <div class="tab active" data-target="explorer">探索モード (Explorer)</div>
     <div class="tab" data-target="sandbox">サンドボックス (Sandbox)</div>
-    <div class="tab" data-target="generator">一般式モード (Formula)</div>
   </div>
 
   <div class="panel-wrap">
@@ -131,45 +130,11 @@
         </div>
       </div>
     </div>
-
-    <div id="generator" class="section">
-      <details>
-        <summary>📐 一般式モード（自動立式）の説明</summary>
-        <p>指定された鏡の枚数 <b>M</b> から、引き伸ばしの元となる「基本形（空行・空列がなく、すべての鏡を光が通過する最小構成）」を自動的に全探索します。</p>
-        <p>発見された基本形のサイズとその個数をもとに、任意の盤面サイズ <b>N</b> に対応する一般計算式（組み合わせ <b>C</b> を用いた式）を自動的に生成します。</p>
-      </details>
-
-      <div class="controls" style="margin-top:10px;">
-        <label>鏡の枚数 (M): 
-          <input id="gen_mInput" type="number" min="1" max="6" value="4" style="width:50px"/>
-        </label>
-        <button id="gen_runBtn">基本形探索 ➔ 立式</button>
-        <span id="gen_progress" class="small-muted"></span>
-      </div>
-
-      <div class="stat" id="gen_resultBox" style="display:none; margin-top:12px; background:#f0f9f0; border:1px solid #c2e0c2; padding:12px; border-radius:6px;">
-        <div><b>📊 解析結果と一般式</b></div>
-        <div id="gen_basisList" style="margin: 8px 0; font-size:0.95em; color:#333; line-height:1.6;"></div>
-        <div style="font-size:1.1em; margin-top:10px; padding-top:8px; border-top:1px dashed #999;">
-          <b>公式 P(N) = </b> <span id="gen_formulaText" style="font-family:monospace; color:#d33; font-weight:bold; word-break:break-all;">---</span>
-        </div>
-      </div>
-
-      <div class="controls" id="gen_calcArea" style="display:none; margin-top:12px; background:#f4f4f4; padding:12px; border-radius:6px; border:1px solid #ddd;">
-        <label>盤面サイズ (N): 
-          <input id="gen_nInput" type="number" min="1" value="5" style="width:60px"/>
-        </label>
-        <button id="gen_calcBtn">パターンの総数を計算</button>
-        <div style="margin-top:8px; font-size:1.1em;">
-          <b>計算結果:</b> <span id="gen_calcResult" style="font-weight:bold; color:#0055cc; font-size:1.2em;">---</span>
-        </div>
-      </div>
-    </div>
   </div>
 
 <script>
 /* =========================
-   共通ユーティリティ（全モードで共有）
+   共通ユーティリティ（両モードで共有）
    ========================= */
 const COLORS = ['#e6194b','#3cb44b','#4363d8','#f58231','#911eb4','#46f0f0','#f032e6','#bcf60c','#fabebe','#008080','#e6beff','#9A6324','#fffac8','#800000','#aaffc3','#808000','#ffd8b1','#000075','#808080','#ffffff'];
 function reflect(dir, mirror){
@@ -185,7 +150,6 @@ const cfgToKey = cfg => cfg.join(',');
    探索モード (Explorer)
    ========================= */
 const EXP = (function(){
-  // (ご提示いただいたEXPコードをそのまま格納しています、変更なし)
   const colsInput = document.getElementById('exp_colsInput');
   const rowsInput = document.getElementById('exp_rowsInput');
   const inputSelect = document.getElementById('exp_inputSelect');
@@ -199,80 +163,212 @@ const EXP = (function(){
   const canvasWrap = document.getElementById('exp_canvasWrap');
   const thumbs = document.getElementById('exp_thumbs');
   const progressSpan = document.getElementById('exp_progress');
-  let currentRenderId = 0;
+
+  let currentRenderId = 0; // 描画処理の競合を防ぐためのID
 
   function simulate_local(R, C, mirrorConfig, startInput){
-    let r=R-1, c=startInput, dir=0; const path=[]; const MAX_STEPS = 10000;
+    let r=R-1, c=startInput, dir=0; const path=[];
+    const MAX_STEPS = 10000;
     for(let steps=0; steps<MAX_STEPS; steps++){
       if(r<0||r>=R||c<0||c>=C){
         if(c===C && r>=0 && r<R) return {exited:true, exitSide:'R', exitRow:r, path};
         return {exited:false, exitSide:'other', exitRow:null, path};
       }
-      path.push([r,c]); const idx = r*C + c; dir = reflect(dir, mirrorConfig[idx]); [r,c] = stepCell(r,c,dir);
+      path.push([r,c]);
+      const idx = r*C + c;
+      dir = reflect(dir, mirrorConfig[idx]);
+      [r,c] = stepCell(r,c,dir);
     }
     return {exited:false, exitSide:'other', exitRow:null, path};
   }
+
   function canonicalizeConfig(R, C, cfg, path){
-    const newCfg = cfg.slice(); const visited = new Set(path.map(([r,c])=> r+','+c));
+    const newCfg = cfg.slice();
+    const visited = new Set(path.map(([r,c])=> r+','+c));
     for(let r=0;r<R;r++) for(let c=0;c<C;c++) if(!visited.has(r+','+c)) newCfg[r*C+c]=0;
     return newCfg;
   }
+
   async function dfsEnumerateAsync(R, C, startInput, progressCb) {
-    let totalCount = 0; let longest = 0; let best = null; let counter = 0;
-    const MAX_PER_MCOUNT = 200; const savedByMCount = {}; const grid = new Array(R * C).fill(-1);
-    const history = new Uint8Array(R * C * 4); const currentPath = []; const mStats = {}; 
+    let totalCount = 0; 
+    let longest = 0;
+    let best = null;
+    let counter = 0;
+    const MAX_PER_MCOUNT = 200; // 鏡の枚数ごとに保存する最大数
+    const savedByMCount = {};
+    const grid = new Array(R * C).fill(-1);
+    const history = new Uint8Array(R * C * 4); 
+    const currentPath = [];
+    const mStats = {}; 
+
     function* exploreGen(r, c, dir) {
       if (++counter % 100000 === 0) yield counter;
+
       if (r < 0 || r >= R || c < 0 || c >= C) {
         if (c === C && r >= 0 && r < R) {
-          totalCount++; let mCount = 0;
-          for(let i=0; i<grid.length; i++) if(grid[i] === 1 || grid[i] === 2) mCount++;
-          mStats[mCount] = (mStats[mCount] || 0) + 1; const pathLen = currentPath.length;
-          if (pathLen > longest) { longest = pathLen; const canon = grid.map(v => v === -1 ? 0 : v); best = { cfg: canon, path: currentPath.slice(), exitRow: r }; }
-          if (!savedByMCount[mCount]) savedByMCount[mCount] = [];
-          if (savedByMCount[mCount].length < MAX_PER_MCOUNT) { const canon = grid.map(v => v === -1 ? 0 : v); savedByMCount[mCount].push({ cfg: canon, path: currentPath.slice(), exitRow: r }); }
-        } return;
+          totalCount++;
+          
+          let mCount = 0;
+          for(let i=0; i<grid.length; i++){
+            if(grid[i] === 1 || grid[i] === 2) mCount++;
+          }
+          mStats[mCount] = (mStats[mCount] || 0) + 1;
+
+          const pathLen = currentPath.length;
+          if (pathLen > longest) {
+            longest = pathLen;
+            const canon = grid.map(v => v === -1 ? 0 : v);
+            best = { cfg: canon, path: currentPath.slice(), exitRow: r };
+          }
+          
+          if (!savedByMCount[mCount]) {
+            savedByMCount[mCount] = [];
+          }
+          if (savedByMCount[mCount].length < MAX_PER_MCOUNT) {
+            const canon = grid.map(v => v === -1 ? 0 : v);
+            savedByMCount[mCount].push({ cfg: canon, path: currentPath.slice(), exitRow: r });
+          }
+        }
+        return;
       }
-      const stateIdx = (r * C + c) * 4 + dir; if (history[stateIdx] === 1) return; history[stateIdx] = 1; currentPath.push([r, c]);
-      const cellIdx = r * C + c; const currentMirror = grid[cellIdx];
-      if (currentMirror !== -1) { const nDir = reflect(dir, currentMirror); const [nr, nc] = stepCell(r, c, nDir); yield* exploreGen(nr, nc, nDir); }
-      else { for (let m = 0; m <= 2; m++) { grid[cellIdx] = m; const nDir = reflect(dir, m); const [nr, nc] = stepCell(r, c, nDir); yield* exploreGen(nr, nc, nDir); grid[cellIdx] = -1; } }
-      currentPath.pop(); history[stateIdx] = 0;
+
+      const stateIdx = (r * C + c) * 4 + dir;
+      if (history[stateIdx] === 1) return;
+      history[stateIdx] = 1;
+      currentPath.push([r, c]);
+
+      const cellIdx = r * C + c;
+      const currentMirror = grid[cellIdx];
+
+      if (currentMirror !== -1) {
+        const nDir = reflect(dir, currentMirror);
+        const [nr, nc] = stepCell(r, c, nDir);
+        yield* exploreGen(nr, nc, nDir);
+      } else {
+        for (let m = 0; m <= 2; m++) {
+          grid[cellIdx] = m;
+          const nDir = reflect(dir, m);
+          const [nr, nc] = stepCell(r, c, nDir);
+          yield* exploreGen(nr, nc, nDir);
+          grid[cellIdx] = -1; 
+        }
+      }
+      currentPath.pop();
+      history[stateIdx] = 0;
     }
+
     const gen = exploreGen(R - 1, startInput, 0);
-    while (true) { const res = gen.next(); if (res.done) break; if (progressCb) progressCb(res.value); await new Promise(resolve => setTimeout(resolve, 0)); }
-    const patterns = []; for (const k in savedByMCount) patterns.push(...savedByMCount[k]);
-    if (best) { const bestKey = cfgToKey(best.cfg); const idx = patterns.findIndex(p => cfgToKey(p.cfg) === bestKey); if (idx > 0) { const p = patterns.splice(idx, 1)[0]; patterns.unshift(p); } else if (idx === -1) { patterns.unshift(best); } }
+    while (true) {
+      const res = gen.next();
+      if (res.done) break;
+      if (progressCb) progressCb(res.value);
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+
+    const patterns = [];
+    for (const k in savedByMCount) {
+      patterns.push(...savedByMCount[k]);
+    }
+
+    if (best) {
+      const bestKey = cfgToKey(best.cfg);
+      const idx = patterns.findIndex(p => cfgToKey(p.cfg) === bestKey);
+      if (idx > 0) {
+        const p = patterns.splice(idx, 1)[0];
+        patterns.unshift(p);
+      } else if (idx === -1) {
+        patterns.unshift(best);
+      }
+    }
     return { count: totalCount, patterns, longest, mStats };
   }
+
   async function approximateEnumerate(R, C, startInput, depthLimit, maxSamples, isHybrid, progressCb){
-    if(R * C <= 25) return await dfsEnumerateAsync(R, C, startInput, (count) => { if (progressCb) progressCb(count, "DFS"); });
-    const seenByMCount = {}; const MAX_PER_MCOUNT = 200; const globalMStatsRaw = {}; let longest = 0, best = null; let current = new Array(R*C).fill(0);
+    if(R * C <= 25) { // 5x5サイズまではDFS自動
+      return await dfsEnumerateAsync(R, C, startInput, (count) => {
+        if (progressCb) progressCb(count, "DFS");
+      });
+    }
+    const seenByMCount = {};
+    const MAX_PER_MCOUNT = 200;
+    const globalMStatsRaw = {};
+    
+    let longest = 0, best = null;
+    let current = new Array(R*C).fill(0);
+    
     for(let s=0; s<maxSamples; s++){
-      const cfg = isHybrid ? current.slice() : new Array(R*C).fill(0); for(let d=0; d<depthLimit; d++) cfg[Math.floor(Math.random()*R*C)] = Math.floor(Math.random()*3);
+      const cfg = isHybrid ? current.slice() : new Array(R*C).fill(0);
+      for(let d=0; d<depthLimit; d++){
+        cfg[Math.floor(Math.random()*R*C)] = Math.floor(Math.random()*3);
+      }
       const res = simulate_local(R, C, cfg, startInput);
       if(res.exited && res.exitSide==='R'){
-        const canon = canonicalizeConfig(R, C, cfg, res.path); const mCount = canon.filter(m => m !== 0).length; globalMStatsRaw[mCount] = (globalMStatsRaw[mCount] || 0) + 1; const key = cfgToKey(canon);
-        if(!seenByMCount[mCount]) seenByMCount[mCount] = new Map(); const seen = seenByMCount[mCount];
+        const canon = canonicalizeConfig(R, C, cfg, res.path);
+        const mCount = canon.filter(m => m !== 0).length;
+        globalMStatsRaw[mCount] = (globalMStatsRaw[mCount] || 0) + 1;
+        
+        const key = cfgToKey(canon);
+        if(!seenByMCount[mCount]) seenByMCount[mCount] = new Map();
+        const seen = seenByMCount[mCount];
+        
         if(!seen.has(key)){
-          if(seen.size < MAX_PER_MCOUNT){ seen.set(key, { cfg: canon, path: res.path.length>200 ? res.path.slice(0,200) : res.path.slice(), exitRow: res.exitRow }); }
-          else if(Math.random() < 0.01){ const keys = Array.from(seen.keys()); const rem = keys[Math.floor(Math.random()*keys.length)]; seen.delete(rem); seen.set(key, { cfg: canon, path: res.path.length>200 ? res.path.slice(0,200) : res.path.slice(), exitRow: res.exitRow }); }
+          if(seen.size < MAX_PER_MCOUNT){
+            seen.set(key, { cfg: canon, path: res.path.length>200 ? res.path.slice(0,200) : res.path.slice(), exitRow: res.exitRow });
+          } else if(Math.random() < 0.01){
+            const keys = Array.from(seen.keys());
+            const rem = keys[Math.floor(Math.random()*keys.length)];
+            seen.delete(rem);
+            seen.set(key, { cfg: canon, path: res.path.length>200 ? res.path.slice(0,200) : res.path.slice(), exitRow: res.exitRow });
+          }
         }
-        if(res.path.length > longest){ longest = res.path.length; best = { cfg: canon.slice(), path: res.path.slice(), exitRow: res.exitRow }; if(isHybrid) current = canon.slice(); }
+        if(res.path.length > longest){
+          longest = res.path.length;
+          best = { cfg: canon.slice(), path: res.path.slice(), exitRow: res.exitRow };
+          if(isHybrid) current = canon.slice();
+        }
       }
-      if(progressCb && s % Math.max(1, Math.floor(maxSamples/100)) === 0) progressCb(s+1, maxSamples);
+      if(progressCb && s % Math.max(1, Math.floor(maxSamples/100)) === 0){
+        progressCb(s+1, maxSamples);
+      }
       if(s % 2000 === 0) await new Promise(r=>setTimeout(r,0));
     }
-    if(progressCb) progressCb(maxSamples, maxSamples); const total = Math.pow(3, R*C); const factor = total / Math.max(1, maxSamples); const mStats = {}; let finalEstimatedCount = 0;
-    for(const k in globalMStatsRaw){ mStats[k] = Math.round(globalMStatsRaw[k] * factor); finalEstimatedCount += mStats[k]; }
-    const patterns = []; for(const k in seenByMCount) patterns.push(...seenByMCount[k].values());
-    if(best){ const bestKey = cfgToKey(best.cfg); const idx = patterns.findIndex(p=>cfgToKey(p.cfg)===bestKey); if(idx>0){ const p = patterns.splice(idx,1)[0]; patterns.unshift(p); } else if(idx===-1) patterns.unshift(best); }
+    if(progressCb) progressCb(maxSamples, maxSamples);
+    
+    const total = Math.pow(3, R*C);
+    const factor = total / Math.max(1, maxSamples);
+    
+    const mStats = {};
+    let finalEstimatedCount = 0;
+    for(const k in globalMStatsRaw){
+      mStats[k] = Math.round(globalMStatsRaw[k] * factor);
+      finalEstimatedCount += mStats[k];
+    }
+
+    const patterns = [];
+    for(const k in seenByMCount) {
+      patterns.push(...seenByMCount[k].values());
+    }
+
+    if(best){
+      const bestKey = cfgToKey(best.cfg);
+      const idx = patterns.findIndex(p=>cfgToKey(p.cfg)===bestKey);
+      if(idx>0){ const p = patterns.splice(idx,1)[0]; patterns.unshift(p); }
+      else if(idx===-1) patterns.unshift(best);
+    }
     return { estimatedCount: finalEstimatedCount, patterns, longest, mStats };
   }
+
   function drawGrid(R, C, cfg, path){
-    canvasWrap.innerHTML = ''; const svgNS='http://www.w3.org/2000/svg'; const cell = 60, w = cell*C + 120, h = cell*R + 40; const svg = document.createElementNS(svgNS,'svg'); svg.setAttribute('width', w); svg.setAttribute('height', h);
+    canvasWrap.innerHTML = '';
+    const svgNS='http://www.w3.org/2000/svg';
+    const cell = 60, w = cell*C + 120, h = cell*R + 40;
+    const svg = document.createElementNS(svgNS,'svg');
+    svg.setAttribute('width', w); svg.setAttribute('height', h);
     for(let r=0;r<R;r++) for(let c=0;c<C;c++){
-      const x = c*cell+20, y = r*cell+20; const rect = document.createElementNS(svgNS,'rect'); rect.setAttribute('x', x); rect.setAttribute('y', y); rect.setAttribute('width', cell); rect.setAttribute('height', cell); rect.setAttribute('fill','white'); rect.setAttribute('stroke','#ccc'); svg.appendChild(rect);
+      const x = c*cell+20, y = r*cell+20;
+      const rect = document.createElementNS(svgNS,'rect');
+      rect.setAttribute('x', x); rect.setAttribute('y', y); rect.setAttribute('width', cell); rect.setAttribute('height', cell);
+      rect.setAttribute('fill','white'); rect.setAttribute('stroke','#ccc'); svg.appendChild(rect);
       const m = cfg[r*C+c];
       if(m===1||m===2){
         const line = document.createElementNS(svgNS,'line');
@@ -282,57 +378,206 @@ const EXP = (function(){
       }
     }
     if(path && path.length>0){
-      const pts = path.map(([r,c]) => (c*cell+20+cell/2)+','+(r*cell+20+cell/2)).join(' '); const pl = document.createElementNS(svgNS,'polyline');
-      pl.setAttribute('points', pts); pl.setAttribute('fill','none'); pl.setAttribute('stroke','#d33'); pl.setAttribute('stroke-width','4'); pl.setAttribute('stroke-linecap','round'); pl.setAttribute('stroke-linejoin','round'); svg.appendChild(pl);
-    } canvasWrap.appendChild(svg);
-  }
-  runBtn.addEventListener('click', async ()=>{
-    const C = parseInt(colsInput.value,10); const R = parseInt(rowsInput.value,10); const mode = modeSelect.value; const inputVal = inputSelect.value; const maxSamples = parseInt(samplesInput.value,10); const depthLimit = parseInt(depthInput.value,10); const isHybrid = (mode==='hybrid'); const preferExact = forceExact.checked; const autoExact = (R * C) <= 25; const doExact = preferExact || autoExact;
-    currentRenderId++; thumbs.innerHTML=''; canvasWrap.innerHTML=''; progressSpan.textContent=''; mirrorStats.style.display = 'none'; mirrorStats.innerHTML = '';
-    if(doExact && (R * C) >= 36){ if(!confirm(`完全探索を選択しています。\nサイズ ${C}x${R} の完全探索は計算量が膨大になり、フリーズや時間がかかる可能性があります。続行しますか？`)){ resultSummary.textContent='キャンセルされました。'; return; } }
-    resultSummary.textContent = doExact ? '完全探索中...' : '探索中...'; let combined = [], totalCount = 0, overallLongest = 0; let globalMStats = {}; const inputs = (inputVal === 'all') ? [...Array(C).keys()] : [parseInt(inputVal,10)];
-    for(let sIdx=0; sIdx<inputs.length; sIdx++){
-      const s = inputs[sIdx]; progressSpan.textContent = `入力 ${s+1} を計算準備中...`; await new Promise(r => setTimeout(r, 10)); let res;
-      if(doExact){ res = await dfsEnumerateAsync(R, C, s, (nodesCount) => { progressSpan.textContent = `入力 ${s+1} を計算中... (探索ノード: ${nodesCount.toLocaleString()}回)`; }); totalCount += res.count; for(const k in res.mStats) globalMStats[k] = (globalMStats[k] || 0) + res.mStats[k]; }
-      else { res = await approximateEnumerate(R, C, s, depthLimit, maxSamples, isHybrid, (done, total)=> { if (total === "DFS") { progressSpan.textContent = `入力 ${s+1} を計算中... (探索ノード: ${done.toLocaleString()}回)`; } else { progressSpan.textContent = `入力 ${s+1}: ${done}/${total} サンプル`; } }); totalCount += (res.estimatedCount ?? 0); for(const k in res.mStats) globalMStats[k] = (globalMStats[k] || 0) + res.mStats[k]; }
-      if(res.longest > overallLongest) overallLongest = res.longest ?? 0; res.patterns.forEach(p => combined.push(Object.assign({inputIndex: s}, p)));
+      const pts = path.map(([r,c]) => (c*cell+20+cell/2)+','+(r*cell+20+cell/2)).join(' ');
+      const pl = document.createElementNS(svgNS,'polyline');
+      pl.setAttribute('points', pts); pl.setAttribute('fill','none'); pl.setAttribute('stroke','#d33'); pl.setAttribute('stroke-width','4');
+      pl.setAttribute('stroke-linecap','round'); pl.setAttribute('stroke-linejoin','round'); svg.appendChild(pl);
     }
-    progressSpan.textContent = ''; resultSummary.innerHTML = `<b>${ inputVal === 'all' ? '全体' : '個別' }（${doExact ? '完全探索: DFS' : '近似'}）</b><br>` + (doExact ? `有効パターン数（正確）: <strong>${totalCount}</strong>` : `推定有効パターン数: 約${totalCount}`) + `<br>発見された最長経路マス数: ${overallLongest}`;
-    const uniqMap = new Map(); combined.forEach(p => { const k = cfgToKey(p.cfg); if(!uniqMap.has(k)) uniqMap.set(k, p); }); const renderPatterns = Array.from(uniqMap.values());
-    let statsHtml = `<b>💡 鏡の枚数ごとの内訳</b>（タグをクリックしてパターンを絞り込み表示できます）<br>`; mirrorStats.innerHTML = statsHtml; const tagsContainer = document.createElement('div'); tagsContainer.className = 'stats-tags';
-    const allBtn = document.createElement('span'); allBtn.className = 'stats-tag active'; allBtn.innerHTML = `すべて表示 (${renderPatterns.length}件表示中)`; allBtn.addEventListener('click', () => { tagsContainer.querySelectorAll('.stats-tag').forEach(t => t.classList.remove('active')); allBtn.classList.add('active'); renderThumbs(renderPatterns, R, C); }); tagsContainer.appendChild(allBtn);
+    canvasWrap.appendChild(svg);
+  }
+
+  runBtn.addEventListener('click', async ()=>{
+    const C = parseInt(colsInput.value,10);
+    const R = parseInt(rowsInput.value,10);
+    const mode = modeSelect.value;
+    const inputVal = inputSelect.value;
+    const maxSamples = parseInt(samplesInput.value,10);
+    const depthLimit = parseInt(depthInput.value,10);
+    const isHybrid = (mode==='hybrid');
+    const preferExact = forceExact.checked;
+    const autoExact = (R * C) <= 25;
+    const doExact = preferExact || autoExact;
+
+    // 前回の描画をキャンセル
+    currentRenderId++;
+    
+    thumbs.innerHTML=''; canvasWrap.innerHTML=''; progressSpan.textContent='';
+    mirrorStats.style.display = 'none'; mirrorStats.innerHTML = '';
+
+    if(doExact && (R * C) >= 36){
+      if(!confirm(`完全探索を選択しています。\nサイズ ${C}x${R} の完全探索は計算量が膨大になり、フリーズや時間がかかる可能性があります。続行しますか？`)){
+        resultSummary.textContent='キャンセルされました。';
+        return;
+      }
+    }
+
+    resultSummary.textContent = doExact ? '完全探索中...' : '探索中...';
+    let combined = [], totalCount = 0, overallLongest = 0;
+    let globalMStats = {};
+
+    const inputs = (inputVal === 'all') ? [...Array(C).keys()] : [parseInt(inputVal,10)];
+
+    for(let sIdx=0; sIdx<inputs.length; sIdx++){
+      const s = inputs[sIdx];
+      progressSpan.textContent = `入力 ${s+1} を計算準備中...`;
+      await new Promise(r => setTimeout(r, 10));
+
+      let res;
+      if(doExact){
+        res = await dfsEnumerateAsync(R, C, s, (nodesCount) => {
+          progressSpan.textContent = `入力 ${s+1} を計算中... (探索ノード: ${nodesCount.toLocaleString()}回)`;
+        });
+        totalCount += res.count;
+        for(const k in res.mStats) globalMStats[k] = (globalMStats[k] || 0) + res.mStats[k];
+      } else {
+        res = await approximateEnumerate(R, C, s, depthLimit, maxSamples, isHybrid, (done, total)=> {
+          if (total === "DFS") {
+            progressSpan.textContent = `入力 ${s+1} を計算中... (探索ノード: ${done.toLocaleString()}回)`;
+          } else {
+            progressSpan.textContent = `入力 ${s+1}: ${done}/${total} サンプル`;
+          }
+        });
+        totalCount += (res.estimatedCount ?? 0);
+        for(const k in res.mStats) globalMStats[k] = (globalMStats[k] || 0) + res.mStats[k];
+      }
+      if(res.longest > overallLongest) overallLongest = res.longest ?? 0;
+      res.patterns.forEach(p => combined.push(Object.assign({inputIndex: s}, p)));
+    }
+
+    progressSpan.textContent = '';
+    resultSummary.innerHTML = `<b>${ inputVal === 'all' ? '全体' : '個別' }（${doExact ? '完全探索: DFS' : '近似'}）</b><br>` +
+      (doExact ? `有効パターン数（正確）: <strong>${totalCount}</strong>` : `推定有効パターン数: 約${totalCount}`) +
+      `<br>発見された最長経路マス数: ${overallLongest}`;
+
+    const uniqMap = new Map();
+    combined.forEach(p => {
+      const k = cfgToKey(p.cfg);
+      if(!uniqMap.has(k)) uniqMap.set(k, p);
+    });
+    const renderPatterns = Array.from(uniqMap.values());
+
+    // --- クリック可能な統計タグの構築 ---
+    let statsHtml = `<b>💡 鏡の枚数ごとの内訳</b>（タグをクリックしてパターンを絞り込み表示できます）<br>`;
+    mirrorStats.innerHTML = statsHtml;
+    
+    const tagsContainer = document.createElement('div');
+    tagsContainer.className = 'stats-tags';
+
+    const allBtn = document.createElement('span');
+    allBtn.className = 'stats-tag active';
+    allBtn.innerHTML = `すべて表示 (${renderPatterns.length}件表示中)`;
+    allBtn.addEventListener('click', () => {
+      tagsContainer.querySelectorAll('.stats-tag').forEach(t => t.classList.remove('active'));
+      allBtn.classList.add('active');
+      renderThumbs(renderPatterns, R, C);
+    });
+    tagsContainer.appendChild(allBtn);
+
     const sortedKeys = Object.keys(globalMStats).map(Number).sort((a,b)=>a-b);
     sortedKeys.forEach(k => {
-      const btn = document.createElement('span'); btn.className = 'stats-tag'; const actualCount = renderPatterns.filter(p => p.cfg.filter(m => m !== 0).length === k).length; btn.innerHTML = `鏡 <b>${k}</b> 枚： ${globalMStats[k]} 件 <span style="font-size:0.8em;opacity:0.8">(表示中:${actualCount})</span>`;
-      btn.addEventListener('click', () => { tagsContainer.querySelectorAll('.stats-tag').forEach(t => t.classList.remove('active')); btn.classList.add('active'); const filtered = renderPatterns.filter(p => p.cfg.filter(m => m !== 0).length === k); renderThumbs(filtered, R, C); }); tagsContainer.appendChild(btn);
+      const btn = document.createElement('span');
+      btn.className = 'stats-tag';
+      // UI上に保持しているサンプル数（renderPatterns内の件数）も参考表示
+      const actualCount = renderPatterns.filter(p => p.cfg.filter(m => m !== 0).length === k).length;
+      btn.innerHTML = `鏡 <b>${k}</b> 枚： ${globalMStats[k]} 件 <span style="font-size:0.8em;opacity:0.8">(表示中:${actualCount})</span>`;
+      
+      btn.addEventListener('click', () => {
+        tagsContainer.querySelectorAll('.stats-tag').forEach(t => t.classList.remove('active'));
+        btn.classList.add('active');
+        const filtered = renderPatterns.filter(p => p.cfg.filter(m => m !== 0).length === k);
+        renderThumbs(filtered, R, C);
+      });
+      tagsContainer.appendChild(btn);
     });
-    mirrorStats.appendChild(tagsContainer); mirrorStats.style.display = 'block'; renderThumbs(renderPatterns, R, C);
+    
+    mirrorStats.appendChild(tagsContainer);
+    mirrorStats.style.display = 'block';
+
+    renderThumbs(renderPatterns, R, C);
   });
+
   function updateInputOptions(){
-    const C = parseInt(colsInput.value,10); inputSelect.innerHTML=''; const optAll = document.createElement('option'); optAll.value='all'; optAll.textContent='全体'; inputSelect.appendChild(optAll);
+    const C = parseInt(colsInput.value,10);
+    inputSelect.innerHTML='';
+    const optAll = document.createElement('option'); optAll.value='all'; optAll.textContent='全体'; inputSelect.appendChild(optAll);
     for(let i=0;i<C;i++){ const o=document.createElement('option'); o.value=i; o.textContent='入力 '+(i+1); inputSelect.appendChild(o); }
   }
-  updateInputOptions(); colsInput.addEventListener('change', updateInputOptions); rowsInput.addEventListener('change', updateInputOptions);
+  updateInputOptions();
+  colsInput.addEventListener('change', updateInputOptions);
+  rowsInput.addEventListener('change', updateInputOptions);
+
   function renderThumbs(patterns, R, C){
-    const renderId = ++currentRenderId; thumbs.innerHTML=''; if(!patterns || patterns.length===0){ thumbs.textContent='この条件に合致する保存されたパターンはありません。'; return; }
-    const list = patterns.slice(); const maxLen = Math.max(...list.map(p=>p.path.length)); const longestIndex = list.findIndex(p=>p.path.length===maxLen); if(longestIndex > 0){ const [lp] = list.splice(longestIndex,1); list.unshift(lp); }
-    const showCount = Math.min(200, list.length); const finalList = list.slice(0, showCount); let i=0; const batchSize=8; const startTime = performance.now(); const maxAllowed=2000;
+    const renderId = ++currentRenderId; // 描画処理用のIDを発行
+    thumbs.innerHTML='';
+    if(!patterns || patterns.length===0){ thumbs.textContent='この条件に合致する保存されたパターンはありません。'; return; }
+    
+    const list = patterns.slice(); 
+    const maxLen = Math.max(...list.map(p=>p.path.length));
+    const longestIndex = list.findIndex(p=>p.path.length===maxLen);
+    if(longestIndex > 0){ const [lp] = list.splice(longestIndex,1); list.unshift(lp); }
+    const showCount = Math.min(200, list.length);
+    const finalList = list.slice(0, showCount);
+    let i=0; const batchSize=8; const startTime = performance.now(); const maxAllowed=2000;
+    
     async function drawBatch(){
-      if (renderId !== currentRenderId) return;
+      if (renderId !== currentRenderId) return; // 別の描画処理が開始された場合は中止
+
       for(let b=0; b<batchSize && i<finalList.length; b++, i++){
-        const item = finalList[i]; const mCount = item.cfg.filter(m => m !== 0).length; const div = document.createElement('div'); div.className='thumb'; const canvas = document.createElement('canvas'); canvas.width=120; canvas.height=120; div.appendChild(canvas); const info = document.createElement('div'); info.className='small'; info.innerHTML = `入${ (item.inputIndex!=null ? (item.inputIndex+1)+'→' : '') }出${String.fromCharCode(65 + (item.exitRow ?? 0))} / 鏡${mCount}<br>長さ: ${item.path.length}${item.path.length===maxLen ? ' ⭐最長' : ''}`; div.appendChild(info); thumbs.appendChild(div);
-        const ctx = canvas.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0,0,120,120); ctx.strokeStyle = '#ccc'; ctx.lineWidth=0.6; const maxDim = Math.max(R, C, 1); const cell = 120 / maxDim; const offsetX = (120 - C * cell) / 2; const offsetY = (120 - R * cell) / 2; ctx.translate(offsetX, offsetY);
+        const item = finalList[i];
+        const mCount = item.cfg.filter(m => m !== 0).length;
+        const div = document.createElement('div'); div.className='thumb';
+        const canvas = document.createElement('canvas'); canvas.width=120; canvas.height=120; div.appendChild(canvas);
+        const info = document.createElement('div'); info.className='small';
+        info.innerHTML = `入${ (item.inputIndex!=null ? (item.inputIndex+1)+'→' : '') }出${String.fromCharCode(65 + (item.exitRow ?? 0))} / 鏡${mCount}<br>長さ: ${item.path.length}${item.path.length===maxLen ? ' ⭐最長' : ''}`;
+        div.appendChild(info);
+        thumbs.appendChild(div);
+        
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff'; ctx.fillRect(0,0,120,120);
+        ctx.strokeStyle = '#ccc'; ctx.lineWidth=0.6;
+        
+        const maxDim = Math.max(R, C, 1);
+        const cell = 120 / maxDim;
+        const offsetX = (120 - C * cell) / 2;
+        const offsetY = (120 - R * cell) / 2;
+
+        ctx.translate(offsetX, offsetY);
+
         for(let r=0;r<R;r++) for(let c=0;c<C;c++){
           const m = item.cfg[r*C+c];
-          if(m===1||m===2){ ctx.beginPath(); if(m===1){ ctx.moveTo((c+1)*cell-2, r*cell+2); ctx.lineTo(c*cell+2, (r+1)*cell-2); } else { ctx.moveTo(c*cell+2, r*cell+2); ctx.lineTo((c+1)*cell-2, (r+1)*cell-2); } ctx.stroke(); }
+          if(m===1||m===2){
+            ctx.beginPath();
+            if(m===1){ ctx.moveTo((c+1)*cell-2, r*cell+2); ctx.lineTo(c*cell+2, (r+1)*cell-2); }
+            else { ctx.moveTo(c*cell+2, r*cell+2); ctx.lineTo((c+1)*cell-2, (r+1)*cell-2); }
+            ctx.stroke();
+          }
         }
-        ctx.strokeStyle='#d33'; ctx.lineWidth=1.4; ctx.beginPath(); const step = Math.max(1, Math.floor(item.path.length / 200)); let moved=false;
-        item.path.forEach(([r,c], idx)=>{ if(idx%step!==0) return; const x=c*cell+cell/2, y=r*cell+cell/2; if(!moved){ctx.moveTo(x,y); moved=true;} else ctx.lineTo(x,y); }); ctx.stroke(); ctx.setTransform(1, 0, 0, 1, 0, 0); div.addEventListener('click', ()=> drawGrid(R, C, item.cfg, item.path));
+        ctx.strokeStyle='#d33'; ctx.lineWidth=1.4; ctx.beginPath();
+        const step = Math.max(1, Math.floor(item.path.length / 200));
+        let moved=false;
+        item.path.forEach(([r,c], idx)=>{ if(idx%step!==0) return; const x=c*cell+cell/2, y=r*cell+cell/2; if(!moved){ctx.moveTo(x,y); moved=true;} else ctx.lineTo(x,y); });
+        ctx.stroke();
+        
+        ctx.setTransform(1, 0, 0, 1, 0, 0); // リセット
+        div.addEventListener('click', ()=> drawGrid(R, C, item.cfg, item.path));
       }
-      if(performance.now() - startTime > maxAllowed){ thumbs.innerHTML += '<br>💡 描画負荷が高いため、以降の表示を省略しました。'; const first = finalList[0]; if(first) drawGrid(R, C, first.cfg, first.path); return; }
-      if(i < finalList.length){ await new Promise(res=>setTimeout(res,12)); requestAnimationFrame(drawBatch); } else { const first = finalList[0]; if(first) drawGrid(R, C, first.cfg, first.path); }
-    } drawBatch();
+      if(performance.now() - startTime > maxAllowed){
+        thumbs.innerHTML += '<br>💡 描画負荷が高いため、以降の表示を省略しました。';
+        const first = finalList[0];
+        if(first) drawGrid(R, C, first.cfg, first.path);
+        return;
+      }
+      if(i < finalList.length){
+        await new Promise(res=>setTimeout(res,12));
+        requestAnimationFrame(drawBatch);
+      } else {
+        const first = finalList[0];
+        if(first) drawGrid(R, C, first.cfg, first.path);
+      }
+    }
+    drawBatch();
   }
+
   return { dfsEnumerateAsync, approximateEnumerate };
 })();
 
@@ -340,278 +585,273 @@ const EXP = (function(){
    サンドボックスモード (Sandbox)
    ========================= */
 const SB = (function(){
-  // (ご提示いただいたSBコードをそのまま格納しています、変更なし)
-  const colsInput = document.getElementById('sb_colsInput'); const rowsInput = document.getElementById('sb_rowsInput'); const simMode = document.getElementById('sb_simMode'); const simulateBtn = document.getElementById('sb_simulateBtn'); const resetBtn = document.getElementById('sb_resetBtn'); const boardWrap = document.getElementById('boardWrap'); const statsBox = document.getElementById('statContent'); const mappingContent = document.getElementById('mappingContent'); const legendDiv = document.getElementById('legend'); const speedSlider = document.getElementById('sb_speedSlider'); const speedDisp = document.getElementById('sb_speedDisp');
-  if(speedSlider && speedDisp){ speedSlider.addEventListener('input', () => { speedDisp.textContent = Number(speedSlider.value).toFixed(1) + 's'; }); }
-  let R = 4, C = 4, cfg = [], inputsBottom = [], inputsLeft = []; let animTimeouts = [];
+  const colsInput = document.getElementById('sb_colsInput');
+  const rowsInput = document.getElementById('sb_rowsInput');
+  const simMode = document.getElementById('sb_simMode');
+  const simulateBtn = document.getElementById('sb_simulateBtn');
+  const resetBtn = document.getElementById('sb_resetBtn');
+  const boardWrap = document.getElementById('boardWrap');
+  const statsBox = document.getElementById('statContent');
+  const mappingContent = document.getElementById('mappingContent');
+  const legendDiv = document.getElementById('legend');
+  
+  const speedSlider = document.getElementById('sb_speedSlider');
+  const speedDisp = document.getElementById('sb_speedDisp');
+  if(speedSlider && speedDisp){
+    speedSlider.addEventListener('input', () => {
+      speedDisp.textContent = Number(speedSlider.value).toFixed(1) + 's';
+    });
+  }
+
+  let R = 4, C = 4, cfg = [], inputsBottom = [], inputsLeft = [];
+  let animTimeouts = []; 
+
   function simulateSingle(R, C, cfg, startR, startC, startDir){
-    let r=startR, c=startC, dir=startDir; const path = []; const MAX_STEPS = 10000;
+    let r=startR, c=startC, dir=startDir;
+    const path = [];
+    const MAX_STEPS = 10000;
     for(let i=0;i<MAX_STEPS;i++){
       if(r<0||r>=R||c<0||c>=C){
-        if(c===C) return {exited:true, exitSide:'R', exitIndex:r, path}; if(c===-1) return {exited:true, exitSide:'L', exitIndex:r, path}; if(r===-1) return {exited:true, exitSide:'U', exitIndex:c, path}; if(r===R) return {exited:true, exitSide:'D', exitIndex:c, path}; return {exited:false, path};
+        if(c===C) return {exited:true, exitSide:'R', exitIndex:r, path};
+        if(c===-1) return {exited:true, exitSide:'L', exitIndex:r, path};
+        if(r===-1) return {exited:true, exitSide:'U', exitIndex:c, path};
+        if(r===R) return {exited:true, exitSide:'D', exitIndex:c, path};
+        return {exited:false, path};
       }
-      path.push([r,c]); const idx = r*C + c; dir = reflect(dir, cfg[idx]); [r,c] = stepCell(r,c,dir);
-    } return {exited:false, path};
+      path.push([r,c]);
+      const idx = r*C + c;
+      dir = reflect(dir, cfg[idx]);
+      [r,c] = stepCell(r,c,dir);
+    }
+    return {exited:false, path};
   }
+
   function initState(){
-    R = Math.max(1, parseInt(rowsInput.value) || 4); C = Math.max(1, parseInt(colsInput.value) || 4); cfg = new Array(R*C).fill(0); inputsBottom = new Array(C).fill(false); inputsLeft = new Array(R).fill(false); renderBoard(); renderLegend(); statsBox.textContent = 'まだシミュレーションしていません。'; mappingContent.textContent = '-';
+    R = Math.max(1, parseInt(rowsInput.value) || 4);
+    C = Math.max(1, parseInt(colsInput.value) || 4);
+    cfg = new Array(R*C).fill(0);
+    inputsBottom = new Array(C).fill(false);
+    inputsLeft = new Array(R).fill(false);
+    renderBoard();
+    renderLegend();
+    statsBox.textContent = 'まだシミュレーションしていません。';
+    mappingContent.textContent = '-';
   }
-  colsInput.addEventListener('input', ()=> initState()); rowsInput.addEventListener('input', ()=> initState());
+  colsInput.addEventListener('input', ()=> initState());
+  rowsInput.addEventListener('input', ()=> initState());
+
   function renderLegend(){
-    legendDiv.innerHTML = ''; const count = Math.max(1, Math.min(R, C, COLORS.length));
-    for(let i=0;i<count;i++){ const div = document.createElement('div'); div.className = 'legend-item'; div.innerHTML = `<div class="swatch" style="background:${COLORS[i]}"></div>光${String.fromCharCode(65+i)}`; legendDiv.appendChild(div); }
+    legendDiv.innerHTML = '';
+    const count = Math.max(1, Math.min(R, C, COLORS.length));
+    for(let i=0;i<count;i++){
+      const div = document.createElement('div');
+      div.className = 'legend-item';
+      div.innerHTML = `<div class="swatch" style="background:${COLORS[i]}"></div>光${String.fromCharCode(65+i)}`;
+      legendDiv.appendChild(div);
+    }
   }
+
   function renderBoard(){
-    boardWrap.innerHTML = ''; const svgNS = 'http://www.w3.org/2000/svg'; const CELL = 48; const MARGIN = 60; const w = CELL * C + MARGIN * 2; const h = CELL * R + MARGIN * 2; const svg = document.createElementNS(svgNS,'svg'); svg.setAttribute('width', w); svg.setAttribute('height', h); svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    boardWrap.innerHTML = '';
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const CELL = 48;
+    const MARGIN = 60;
+    const w = CELL * C + MARGIN * 2;
+    const h = CELL * R + MARGIN * 2;
+    const svg = document.createElementNS(svgNS,'svg');
+    svg.setAttribute('width', w);
+    svg.setAttribute('height', h);
+    svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+
     for(let r=0;r<R;r++){
       for(let c=0;c<C;c++){
-        const x = c*CELL + MARGIN; const y = r*CELL + MARGIN; const rect = document.createElementNS(svgNS,'rect'); rect.setAttribute('x', x); rect.setAttribute('y', y); rect.setAttribute('width', CELL); rect.setAttribute('height', CELL); rect.setAttribute('fill', '#fff'); rect.setAttribute('stroke', '#ccc'); svg.appendChild(rect); const m = cfg[r*C + c];
+        const x = c*CELL + MARGIN;
+        const y = r*CELL + MARGIN;
+        const rect = document.createElementNS(svgNS,'rect');
+        rect.setAttribute('x', x); rect.setAttribute('y', y);
+        rect.setAttribute('width', CELL); rect.setAttribute('height', CELL);
+        rect.setAttribute('fill', '#fff'); rect.setAttribute('stroke', '#ccc');
+        svg.appendChild(rect);
+        const m = cfg[r*C + c];
         if(m){
           const line = document.createElementNS(svgNS,'line');
-          if(m === 1){ line.setAttribute('x1', x + CELL - 6); line.setAttribute('y1', y + 6); line.setAttribute('x2', x + 6); line.setAttribute('y2', y + CELL - 6); }
-          else { line.setAttribute('x1', x + 6); line.setAttribute('y1', y + 6); line.setAttribute('x2', x + CELL - 6); line.setAttribute('y2', y + CELL - 6); }
+          if(m === 1){
+            line.setAttribute('x1', x + CELL - 6); line.setAttribute('y1', y + 6);
+            line.setAttribute('x2', x + 6); line.setAttribute('y2', y + CELL - 6);
+          } else {
+            line.setAttribute('x1', x + 6); line.setAttribute('y1', y + 6);
+            line.setAttribute('x2', x + CELL - 6); line.setAttribute('y2', y + CELL - 6);
+          }
           line.setAttribute('stroke', '#222'); line.setAttribute('stroke-width', 3); svg.appendChild(line);
         }
       }
     }
+
     for(let c=0;c<C;c++){
-      const cx = MARGIN + c*CELL + CELL/2; const cy = MARGIN + R*CELL + 20; const circle = document.createElementNS(svgNS,'circle'); circle.setAttribute('cx', cx); circle.setAttribute('cy', cy); circle.setAttribute('r', 8); circle.setAttribute('fill', inputsBottom[c] ? '#222' : '#fff'); circle.setAttribute('stroke', '#222'); circle.dataset.bottom = c; circle.style.cursor = 'pointer'; svg.appendChild(circle);
-      if(inputsBottom[c]){ const t = document.createElementNS(svgNS,'text'); t.textContent = String.fromCharCode(65 + c); t.setAttribute('x', cx); t.setAttribute('y', cy + 22); t.setAttribute('text-anchor', 'middle'); t.setAttribute('font-size', 15); t.setAttribute('font-weight', 'bold'); t.setAttribute('fill', '#000'); svg.appendChild(t); }
+      const cx = MARGIN + c*CELL + CELL/2;
+      const cy = MARGIN + R*CELL + 20;
+      const circle = document.createElementNS(svgNS,'circle');
+      circle.setAttribute('cx', cx); circle.setAttribute('cy', cy);
+      circle.setAttribute('r', 8);
+      circle.setAttribute('fill', inputsBottom[c] ? '#222' : '#fff');
+      circle.setAttribute('stroke', '#222');
+      circle.dataset.bottom = c; circle.style.cursor = 'pointer'; svg.appendChild(circle);
+      if(inputsBottom[c]){
+        const t = document.createElementNS(svgNS,'text');
+        t.textContent = String.fromCharCode(65 + c);
+        t.setAttribute('x', cx); t.setAttribute('y', cy + 22);
+        t.setAttribute('text-anchor', 'middle');
+        t.setAttribute('font-size', 15); t.setAttribute('font-weight', 'bold');
+        t.setAttribute('fill', '#000'); svg.appendChild(t);
+      }
     }
+
     for(let r=0;r<R;r++){
-      const cx = MARGIN - 20; const cy = MARGIN + r*CELL + CELL/2; const circle = document.createElementNS(svgNS,'circle'); circle.setAttribute('cx', cx); circle.setAttribute('cy', cy); circle.setAttribute('r', 8); circle.setAttribute('fill', inputsLeft[r] ? '#222' : '#fff'); circle.setAttribute('stroke', '#222'); circle.dataset.left = r; circle.style.cursor = 'pointer'; svg.appendChild(circle);
-      if(inputsLeft[r]){ const t = document.createElementNS(svgNS,'text'); t.textContent = String.fromCharCode(65 + r); t.setAttribute('x', cx - 22); t.setAttribute('y', cy + 5); t.setAttribute('text-anchor', 'middle'); t.setAttribute('font-size', 15); t.setAttribute('font-weight', 'bold'); t.setAttribute('fill', '#000'); svg.appendChild(t); }
+      const cx = MARGIN - 20;
+      const cy = MARGIN + r*CELL + CELL/2;
+      const circle = document.createElementNS(svgNS,'circle');
+      circle.setAttribute('cx', cx); circle.setAttribute('cy', cy);
+      circle.setAttribute('r', 8);
+      circle.setAttribute('fill', inputsLeft[r] ? '#222' : '#fff');
+      circle.setAttribute('stroke', '#222');
+      circle.dataset.left = r; circle.style.cursor = 'pointer'; svg.appendChild(circle);
+      if(inputsLeft[r]){
+        const t = document.createElementNS(svgNS,'text');
+        t.textContent = String.fromCharCode(65 + r);
+        t.setAttribute('x', cx - 22); t.setAttribute('y', cy + 5);
+        t.setAttribute('text-anchor', 'middle');
+        t.setAttribute('font-size', 15); t.setAttribute('font-weight', 'bold');
+        t.setAttribute('fill', '#000'); svg.appendChild(t);
+      }
     }
-    svg.addEventListener('click', ev => { const pt = svg.createSVGPoint(); pt.x = ev.clientX; pt.y = ev.clientY; const loc = pt.matrixTransform(svg.getScreenCTM().inverse()); handleClick(loc.x, loc.y, svg); }); boardWrap.appendChild(svg);
+
+    svg.addEventListener('click', ev => {
+      const pt = svg.createSVGPoint(); pt.x = ev.clientX; pt.y = ev.clientY;
+      const loc = pt.matrixTransform(svg.getScreenCTM().inverse());
+      handleClick(loc.x, loc.y, svg);
+    });
+
+    boardWrap.appendChild(svg);
   }
+
   function handleClick(x,y,svg){
-    const CELL = 48; const MARGIN = 60;
-    for(const el of svg.querySelectorAll('circle[data-bottom]')){ const cx = parseFloat(el.getAttribute('cx')), cy = parseFloat(el.getAttribute('cy')); if(Math.hypot(cx-x, cy-y) <= 10){ const c = parseInt(el.dataset.bottom, 10); inputsBottom[c] = !inputsBottom[c]; renderBoard(); return; } }
-    for(const el of svg.querySelectorAll('circle[data-left]')){ const cx = parseFloat(el.getAttribute('cx')), cy = parseFloat(el.getAttribute('cy')); if(Math.hypot(cx-x, cy-y) <= 10){ const r = parseInt(el.dataset.left, 10); inputsLeft[r] = !inputsLeft[r]; renderBoard(); return; } }
-    const gx = x - MARGIN, gy = y - MARGIN; const c = Math.floor(gx / CELL), r = Math.floor(gy / CELL); if(r >= 0 && r < R && c >= 0 && c < C){ cfg[r*C + c] = (cfg[r*C + c] + 1) % 3; renderBoard(); }
+    const CELL = 48;
+    const MARGIN = 60;
+    for(const el of svg.querySelectorAll('circle[data-bottom]')){
+      const cx = parseFloat(el.getAttribute('cx')), cy = parseFloat(el.getAttribute('cy'));
+      if(Math.hypot(cx-x, cy-y) <= 10){ const c = parseInt(el.dataset.bottom, 10); inputsBottom[c] = !inputsBottom[c]; renderBoard(); return; }
+    }
+    for(const el of svg.querySelectorAll('circle[data-left]')){
+      const cx = parseFloat(el.getAttribute('cx')), cy = parseFloat(el.getAttribute('cy'));
+      if(Math.hypot(cx-x, cy-y) <= 10){ const r = parseInt(el.dataset.left, 10); inputsLeft[r] = !inputsLeft[r]; renderBoard(); return; }
+    }
+    const gx = x - MARGIN, gy = y - MARGIN;
+    const c = Math.floor(gx / CELL), r = Math.floor(gy / CELL);
+    if(r >= 0 && r < R && c >= 0 && c < C){ cfg[r*C + c] = (cfg[r*C + c] + 1) % 3; renderBoard(); }
   }
+
   function simulateMultiByMode(mode){
-    const results = []; const upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'; const lower = upper.toLowerCase();
-    if(mode === 'down' || mode === 'both'){ for(let c=0;c<C;c++) if(inputsBottom[c]) results.push({ type:'down', index:c, letter: upper[c] || ('?'+c), res: simulateSingle(R, C, cfg, R-1, c, 0) }); }
-    if(mode === 'left' || mode === 'both'){ for(let r=0;r<R;r++) if(inputsLeft[r]) results.push({ type:'left', index:r, letter: lower[r] || ('?'+r), res: simulateSingle(R, C, cfg, r, 0, 1) }); }
+    const results = [];
+    const upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    const lower = upper.toLowerCase();
+    if(mode === 'down' || mode === 'both'){
+      for(let c=0;c<C;c++) if(inputsBottom[c]) results.push({ type:'down', index:c, letter: upper[c] || ('?'+c), res: simulateSingle(R, C, cfg, R-1, c, 0) });
+    }
+    if(mode === 'left' || mode === 'both'){
+      for(let r=0;r<R;r++) if(inputsLeft[r]) results.push({ type:'left', index:r, letter: lower[r] || ('?'+r), res: simulateSingle(R, C, cfg, r, 0, 1) });
+    }
     return results;
   }
+
   function drawSimulation(results){
-    const svg = boardWrap.querySelector('svg'); if(!svg) return; svg.querySelectorAll('[data-overlay]').forEach(e => e.remove()); animTimeouts.forEach(clearTimeout); animTimeouts = []; const CELL = 48; const MARGIN = 60; const duration = speedSlider ? parseFloat(speedSlider.value) : 1.5;
+    const svg = boardWrap.querySelector('svg'); if(!svg) return;
+    
+    svg.querySelectorAll('[data-overlay]').forEach(e => e.remove());
+    animTimeouts.forEach(clearTimeout);
+    animTimeouts = [];
+
+    const CELL = 48;
+    const MARGIN = 60;
+    const duration = speedSlider ? parseFloat(speedSlider.value) : 1.5;
+
     for(let i=0;i<results.length;i++){
-      const entry = results[i]; const res = entry.res; const color = COLORS[i % COLORS.length];
+      const entry = results[i];
+      const res = entry.res;
+      const color = COLORS[i % COLORS.length];
+      
       if(res.path && res.path.length > 0){
-        const pathData = res.path.map(([r,c], idx) => `${idx === 0 ? 'M' : 'L'} ${MARGIN + c*CELL + CELL/2} ${MARGIN + r*CELL + CELL/2}`).join(' '); const pathEl = document.createElementNS('http://www.w3.org/2000/svg','path'); pathEl.setAttribute('d', pathData); pathEl.setAttribute('fill', 'none'); pathEl.setAttribute('stroke', color); pathEl.setAttribute('stroke-width', 3); pathEl.setAttribute('stroke-linecap', 'round'); pathEl.setAttribute('stroke-linejoin', 'round'); pathEl.setAttribute('data-overlay', '1'); svg.appendChild(pathEl); const length = pathEl.getTotalLength(); pathEl.style.strokeDasharray = length; pathEl.style.strokeDashoffset = length; pathEl.getBoundingClientRect(); pathEl.style.transition = `stroke-dashoffset ${duration}s linear`; pathEl.style.strokeDashoffset = '0';
+        const pathData = res.path.map(([r,c], idx) => 
+          `${idx === 0 ? 'M' : 'L'} ${MARGIN + c*CELL + CELL/2} ${MARGIN + r*CELL + CELL/2}`
+        ).join(' ');
+
+        const pathEl = document.createElementNS('http://www.w3.org/2000/svg','path');
+        pathEl.setAttribute('d', pathData); 
+        pathEl.setAttribute('fill', 'none'); 
+        pathEl.setAttribute('stroke', color);
+        pathEl.setAttribute('stroke-width', 3); 
+        pathEl.setAttribute('stroke-linecap', 'round'); 
+        pathEl.setAttribute('stroke-linejoin', 'round');
+        pathEl.setAttribute('data-overlay', '1'); 
+        svg.appendChild(pathEl);
+
+        const length = pathEl.getTotalLength();
+        pathEl.style.strokeDasharray = length;
+        pathEl.style.strokeDashoffset = length;
+        
+        pathEl.getBoundingClientRect(); 
+        
+        pathEl.style.transition = `stroke-dashoffset ${duration}s linear`;
+        pathEl.style.strokeDashoffset = '0';
+
         if(res.exited){
-          let exx, exy; const gap = 18; if(res.exitSide === 'R'){ exx = MARGIN + C*CELL + gap; exy = MARGIN + res.exitIndex*CELL + CELL/2; } if(res.exitSide === 'U'){ exx = MARGIN + res.exitIndex*CELL + CELL/2; exy = MARGIN - gap; } if(res.exitSide === 'L'){ exx = MARGIN - gap; exy = MARGIN + res.exitIndex*CELL + CELL/2; } if(res.exitSide === 'D'){ exx = MARGIN + res.exitIndex*CELL + CELL/2; exy = MARGIN + R*CELL + gap; }
-          const et = document.createElementNS('http://www.w3.org/2000/svg','text'); et.textContent = entry.letter; et.setAttribute('x', exx); et.setAttribute('y', exy); et.setAttribute('font-size', 18); et.setAttribute('font-weight', 'bold'); et.setAttribute('fill', '#000'); et.setAttribute('stroke', '#fff'); et.setAttribute('stroke-width', 3); et.setAttribute('paint-order', 'stroke'); et.setAttribute('text-anchor', 'middle'); et.setAttribute('dominant-baseline', 'middle'); et.setAttribute('data-overlay', '1'); et.style.opacity = '0'; et.style.transition = 'opacity 0.3s ease'; svg.appendChild(et); const tid = setTimeout(() => { et.style.opacity = '1'; }, duration * 1000); animTimeouts.push(tid);
+          let exx, exy; const gap = 18;
+          if(res.exitSide === 'R'){ exx = MARGIN + C*CELL + gap; exy = MARGIN + res.exitIndex*CELL + CELL/2; }
+          if(res.exitSide === 'U'){ exx = MARGIN + res.exitIndex*CELL + CELL/2; exy = MARGIN - gap; }
+          if(res.exitSide === 'L'){ exx = MARGIN - gap; exy = MARGIN + res.exitIndex*CELL + CELL/2; }
+          if(res.exitSide === 'D'){ exx = MARGIN + res.exitIndex*CELL + CELL/2; exy = MARGIN + R*CELL + gap; }
+
+          const et = document.createElementNS('http://www.w3.org/2000/svg','text');
+          et.textContent = entry.letter;
+          et.setAttribute('x', exx); et.setAttribute('y', exy);
+          et.setAttribute('font-size', 18); et.setAttribute('font-weight', 'bold');
+          et.setAttribute('fill', '#000'); et.setAttribute('stroke', '#fff'); et.setAttribute('stroke-width', 3);
+          et.setAttribute('paint-order', 'stroke'); et.setAttribute('text-anchor', 'middle'); et.setAttribute('dominant-baseline', 'middle');
+          et.setAttribute('data-overlay', '1'); 
+          et.style.opacity = '0';
+          et.style.transition = 'opacity 0.3s ease';
+          svg.appendChild(et);
+
+          const tid = setTimeout(() => {
+            et.style.opacity = '1';
+          }, duration * 1000);
+          animTimeouts.push(tid);
         }
       }
-    } updateStatsAndMapping(results);
+    }
+    updateStatsAndMapping(results);
   }
+
   function updateStatsAndMapping(results){
     if(!results || results.length === 0){ statsBox.textContent = 'まだシミュレーションしていません。'; mappingContent.textContent = '-'; return; }
     let exitCount = 0; let total = 0; let html = '', map = '';
     results.forEach(r => {
-      const len = r.res.path.length; total += len; if(r.res.exited) exitCount++; html += `${r.letter}: len=${len} / ${r.res.exited ? ('exit=' + r.res.exitSide + '(' + r.res.exitIndex + ')') : '未到達'}<br>`; map += `<div class="small">${r.letter} → ${r.res.exited ? (r.res.exitSide + ' ' + r.res.exitIndex) : '未到達'}</div>`;
-    }); statsBox.innerHTML = `・光線本数: ${results.length}<br>・通過マス数: ${total}<br>・出口数: ${exitCount}<br><b>各光線</b><br>${html}`; mappingContent.innerHTML = map;
-  }
-  simulateBtn.addEventListener('click', ()=>{ const results = simulateMultiByMode(simMode.value); drawSimulation(results); }); resetBtn.addEventListener('click', ()=>{ if(confirm('盤面を初期化しますか？')) initState(); }); initState(); return { simulateSingle };
-})();
-
-/* =========================
-   一般式モード (Generator) —— 【新設パーツ】
-   ========================= */
-const GEN = (function(){
-  const mInput = document.getElementById('gen_mInput');
-  const runBtn = document.getElementById('gen_runBtn');
-  const progress = document.getElementById('gen_progress');
-  const resultBox = document.getElementById('gen_resultBox');
-  const basisList = document.getElementById('gen_basisList');
-  const formulaText = document.getElementById('gen_formulaText');
-  const calcArea = document.getElementById('gen_calcArea');
-  const nInput = document.getElementById('gen_nInput');
-  const calcBtn = document.getElementById('gen_calcBtn');
-  const calcResult = document.getElementById('gen_calcResult');
-
-  let currentFormulaData = null; // { "H,W": count }
-
-  // 組み合わせ C の計算
-  function comb(n, k) {
-    if (k < 0 || k > n) return 0;
-    if (k === 0 || k === n) return 1;
-    if (k > n / 2) k = n - k;
-    let res = 1;
-    for (let i = 1; i <= k; i++) res = res * (n - i + 1) / i;
-    return res;
-  }
-
-  // いずれかの下辺入力から入射し、右辺に脱出するルートが1つでもあるかチェック
-  // 同時に、置いたすべての鏡(M枚)を光が通過しているかも厳密にチェック（純粋テストの一部）
-  function hasValidRoute(H, W, grid, M) {
-    for (let startC = 0; startC < W; startC++) {
-      let r = H - 1, c = startC, dir = 0;
-      const visitedMirrors = new Set();
-      const MAX_STEPS = 4 * H * W; // 無限ループ防止
-
-      for (let step = 0; step < MAX_STEPS; step++) {
-        if (r < 0 || r >= H || c < 0 || c >= W) {
-          if (c === W && r >= 0 && r < H) {
-            // 右辺からの脱出に成功。かつ「配置したM枚の鏡をすべて通過した」なら完全合格
-            if (visitedMirrors.size === M) return true;
-          }
-          break;
-        }
-        const cellIdx = r * W + c;
-        if (grid[cellIdx] > 0) visitedMirrors.add(cellIdx);
-
-        dir = reflect(dir, grid[cellIdx]);
-        [r, c] = stepCell(r, c, dir);
-      }
-    }
-    return false;
-  }
-
-  async function generateFormulaAsync(M) {
-    const formulaData = {};
-    const minDim = M === 1 ? 1 : 2;
-
-    // 基本形のサイズ候補 (H, W) を全探索
-    for (let H = minDim; H <= M; H++) {
-      for (let W = minDim; W <= M; W++) {
-        progress.textContent = `サイズ ${H}x${W} を探索中...`;
-        await new Promise(r => setTimeout(r, 0)); // UIフリーズ防止
-
-        const grid = new Array(H * W).fill(0);
-        const rowCounts = new Array(H).fill(0);
-        const colCounts = new Array(W).fill(0);
-        let validCount = 0;
-
-        // バックトラッキングによる超強力な枝切り全探索
-        function dfs(cellIdx, mirrorsLeft) {
-          // 【枝切り1】直前の行が完全に終わった段階で、その行の鏡の数が0なら即終了（空行確定のため）
-          if (cellIdx > 0 && cellIdx % W === 0) {
-            const prevR = Math.floor(cellIdx / W) - 1;
-            if (rowCounts[prevR] === 0) return;
-          }
-          // 【枝切り2】現在の列について、残りのマスを全て鏡にしても1枚に届かないなら即終了（空列確定のため）
-          const currentR = Math.floor(cellIdx / W);
-          const currentC = cellIdx % W;
-          if (colCounts[currentC] + (H - currentR) < 1) return;
-
-          // 全セル探索終了
-          if (cellIdx === H * W) {
-            if (mirrorsLeft === 0) {
-              // 純粋テストの最終確認（空行・空列のゼロチェック）
-              if (rowCounts.includes(0) || colCounts.includes(0)) return;
-              // ルートが有効かつコピー（ゴミ）ではないかチェック
-              if (hasValidRoute(H, W, grid, M)) {
-                validCount++;
-              }
-            }
-            return;
-          }
-
-          const cellsLeft = H * W - cellIdx;
-          if (cellsLeft < mirrorsLeft) return; // 鏡が足りない
-
-          // パターンA: 鏡を置かない
-          dfs(cellIdx + 1, mirrorsLeft);
-
-          // パターンB: 鏡を置く (1: /, 2: \)
-          if (mirrorsLeft > 0) {
-            for (let m = 1; m <= 2; m++) {
-              grid[cellIdx] = m;
-              rowCounts[currentR]++;
-              colCounts[currentC]++;
-
-              dfs(cellIdx + 1, mirrorsLeft - 1);
-
-              grid[cellIdx] = 0;
-              rowCounts[currentR]--;
-              colCounts[currentC]--;
-            }
-          }
-        }
-
-        dfs(0, M);
-
-        if (validCount > 0) {
-          formulaData[`${H},${W}`] = validCount;
-        }
-      }
-    }
-    return formulaData;
-  }
-
-  runBtn.addEventListener('click', async () => {
-    const M = parseInt(mInput.value, 10);
-    if (isNaN(M) || M < 1) return;
-
-    if (M >= 6) {
-      if (!confirm("M=6以上の基本形探索は、総当たり数が多いため10〜20秒ほど時間がかかる場合があります。続行しますか？")) return;
-    }
-
-    runBtn.disabled = true;
-    resultBox.style.display = 'none';
-    calcArea.style.display = 'none';
-    progress.textContent = '探索準備中...';
-
-    const startTime = performance.now();
-    currentFormulaData = await generateFormulaAsync(M);
-    const endTime = performance.now();
-
-    runBtn.disabled = false;
-    progress.textContent = `探索完了 (${((endTime - startTime)/1000).toFixed(2)}秒)`;
-
-    // 結果のリスト表示と、数式テキストの生成
-    basisList.innerHTML = '';
-    const terms = [];
-
-    const keys = Object.keys(currentFormulaData).sort((a, b) => {
-      const [hA, wA] = a.split(',').map(Number);
-      const [hB, wB] = b.split(',').map(Number);
-      return (hA * wA) - (hB * wB); // サイズが小さい順に並べ替え
+      const len = r.res.path.length; total += len; if(r.res.exited) exitCount++;
+      html += `${r.letter}: len=${len} / ${r.res.exited ? ('exit=' + r.res.exitSide + '(' + r.res.exitIndex + ')') : '未到達'}<br>`;
+      map += `<div class="small">${r.letter} → ${r.res.exited ? (r.res.exitSide + ' ' + r.res.exitIndex) : '未到達'}</div>`;
     });
-
-    if (keys.length === 0) {
-      basisList.innerHTML = '有効な独立した基本形が見つかりませんでした。';
-      formulaText.textContent = '0';
-    } else {
-      keys.forEach(key => {
-        const [H, W] = key.split(',').map(Number);
-        const count = currentFormulaData[key];
-        
-        const item = document.createElement('div');
-        item.innerHTML = `・サイズ <b>${H}×${W}</b> の基本形（スタンプ原画）: <b style="color:#0066cc;">${count}</b> 個 ➔ <span style="color:#555;">公式への反映: ${count} × <sub>N</sub>C<sub>${H}</sub> × <sub>N</sub>C<sub>${W}</sub></span>`;
-        basisList.appendChild(item);
-
-        terms.push(`${count}*(<sub>N</sub>C<sub>${H}</sub>)*(<sub>N</sub>C<sub>${W}</sub>)`);
-      });
-      formulaText.innerHTML = terms.join(' + ');
-    }
-
-    resultBox.style.display = 'block';
-    calcArea.style.display = 'block';
-    doCalculation();
-  });
-
-  function doCalculation() {
-    if (!currentFormulaData) return;
-    const N = parseInt(nInput.value, 10);
-    if (isNaN(N) || N < 1) { calcResult.textContent = '---'; return; }
-
-    let total = 0;
-    for (const key in currentFormulaData) {
-      const [H, W] = key.split(',').map(Number);
-      const count = currentFormulaData[key];
-      total += count * comb(N, H) * comb(N, W);
-    }
-    calcResult.textContent = total.toLocaleString() + ' パターン';
+    statsBox.innerHTML = `・光線本数: ${results.length}<br>・通過マス数: ${total}<br>・出口数: ${exitCount}<br><b>各光線</b><br>${html}`;
+    mappingContent.innerHTML = map;
   }
 
-  calcBtn.addEventListener('click', doCalculation);
-  nInput.addEventListener('input', doCalculation);
+  simulateBtn.addEventListener('click', ()=>{
+    const results = simulateMultiByMode(simMode.value);
+    drawSimulation(results);
+  });
+  resetBtn.addEventListener('click', ()=>{ if(confirm('盤面を初期化しますか？')) initState(); });
+
+  initState();
+
+  return { simulateSingle };
 })();
 
 /* =========================
@@ -620,9 +860,11 @@ const GEN = (function(){
 (function(){
   const tabs = document.querySelectorAll('.tab');
   tabs.forEach(t => t.addEventListener('click', ()=>{
-    tabs.forEach(x=>x.classList.remove('active')); t.classList.add('active');
+    tabs.forEach(x=>x.classList.remove('active'));
+    t.classList.add('active');
     const tgt = t.dataset.target;
-    document.querySelectorAll('.section').forEach(s=>s.classList.remove('active')); document.getElementById(tgt).classList.add('active');
+    document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
+    document.getElementById(tgt).classList.add('active');
   }));
 })();
 </script>
