@@ -168,12 +168,16 @@ const EXP = (function(){
     return newCfg;
   }
 
-  // ★ Generator関数を使った非同期DFS（フリーズ完全回避版）
+  // ★ Generator関数を使った非同期DFS（フリーズ完全回避・メモリ節約版）
   async function dfsEnumerateAsync(N, startInput, progressCb) {
-    const seen = new Map();
+    let totalCount = 0; // 重複チェック不要でカウントのみ
     let longest = 0;
     let best = null;
     let counter = 0;
+    
+    // ★ メモリ不足対策：保存するパターン数に上限を設ける
+    const MAX_KEEP = 2000; 
+    const savedPatterns = [];
 
     const grid = new Array(N * N).fill(-1);
     const history = new Uint8Array(N * N * 4); 
@@ -185,15 +189,21 @@ const EXP = (function(){
 
       if (r < 0 || r >= N || c < 0 || c >= N) {
         if (c === N && r >= 0 && r < N) {
-          const canon = grid.map(v => v === -1 ? 0 : v);
-          const key = cfgToKey(canon);
-          if (!seen.has(key)) {
-            const pathCopy = currentPath.slice();
-            seen.set(key, { cfg: canon, path: pathCopy, exitRow: r });
-            if (pathCopy.length > longest) {
-              longest = pathCopy.length;
-              best = { cfg: canon.slice(), path: pathCopy.slice(), exitRow: r };
-            }
+          // DFSの性質上、生成されるパターンはすべてユニークになるため単純にカウント
+          totalCount++;
+          const pathLen = currentPath.length;
+
+          // 最長経路の更新
+          if (pathLen > longest) {
+            longest = pathLen;
+            const canon = grid.map(v => v === -1 ? 0 : v);
+            best = { cfg: canon, path: currentPath.slice(), exitRow: r };
+          }
+
+          // ★ 上限に達するまでは表示用に保存
+          if (savedPatterns.length < MAX_KEEP) {
+            const canon = grid.map(v => v === -1 ? 0 : v);
+            savedPatterns.push({ cfg: canon, path: currentPath.slice(), exitRow: r });
           }
         }
         return;
@@ -235,7 +245,7 @@ const EXP = (function(){
       await new Promise(resolve => setTimeout(resolve, 0));
     }
 
-    const patterns = [...seen.values()];
+    const patterns = savedPatterns;
     if (best) {
       const bestKey = cfgToKey(best.cfg);
       const idx = patterns.findIndex(p => cfgToKey(p.cfg) === bestKey);
@@ -246,7 +256,9 @@ const EXP = (function(){
         patterns.unshift(best);
       }
     }
-    return { count: seen.size, patterns, longest };
+    
+    // countに総数を返す
+    return { count: totalCount, patterns, longest };
   }
 
   // 近似探索（6×6以上の盤面用）
