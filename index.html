@@ -25,10 +25,15 @@
   .swatch{width:18px;height:12px;margin-right:8px;border-radius:2px}
   .note{font-size:0.85em;color:#666;margin-top:6px}
   /* 探索モード固有 */
-  .thumb{display:inline-block;margin:6px;border:1px solid #ccc;padding:6px;cursor:pointer;vertical-align:top}
+  .thumb{display:inline-block;margin:6px;border:1px solid #ccc;padding:6px;cursor:pointer;vertical-align:top; border-radius:4px; transition:box-shadow 0.2s}
+  .thumb:hover{box-shadow:0 2px 6px rgba(0,0,0,0.2)}
   .small-muted{font-size:0.85em;color:#666}
   details{margin-top:12px;background:#f9f9f9;border:1px solid #ccc;border-radius:6px;padding:8px}
   details summary{cursor:pointer;font-weight:bold}
+  /* 内訳表示用 */
+  .stats-board{margin-top:8px; padding:10px; background:#f0f8ff; border:1px solid #cce0ff; border-radius:6px; font-size:0.95em; display:none}
+  .stats-tags{display:flex; flex-wrap:wrap; gap:8px; margin-top:6px}
+  .stats-tag{background:#fff; border:1px solid #b3d4ff; padding:2px 8px; border-radius:12px; font-size:0.9em; color:#0055cc}
 </style>
 </head>
 <body>
@@ -68,6 +73,7 @@
 
       <div class="controls">
         <strong>結果：</strong> <span id="exp_resultSummary">---</span>
+        <div id="exp_mirrorStats" class="stats-board"></div>
       </div>
 
       <div id="exp_canvasWrap"></div>
@@ -144,6 +150,7 @@ const EXP = (function(){
   const depthInput = document.getElementById('exp_depthInput');
   const forceExact = document.getElementById('exp_forceExact');
   const resultSummary = document.getElementById('exp_resultSummary');
+  const mirrorStats = document.getElementById('exp_mirrorStats');
   const canvasWrap = document.getElementById('exp_canvasWrap');
   const thumbs = document.getElementById('exp_thumbs');
   const progressSpan = document.getElementById('exp_progress');
@@ -342,6 +349,7 @@ const EXP = (function(){
     const doExact = preferExact || autoExact;
 
     thumbs.innerHTML=''; canvasWrap.innerHTML=''; progressSpan.textContent='';
+    mirrorStats.style.display = 'none'; mirrorStats.innerHTML = '';
 
     if(doExact && N >= 6){
       if(!confirm(`完全探索を選択しています。\nN=${N} の完全探索は計算量が膨大になり、時間がかかる可能性があります。続行しますか？`)){
@@ -384,12 +392,36 @@ const EXP = (function(){
       (doExact ? `有効パターン数（正確）: <strong>${totalCount}</strong>` : `推定有効パターン数: 約${totalCount}`) +
       `<br>発見された最長経路マス数: ${overallLongest}`;
 
+    // ユニークパターンの抽出と、鏡の数ごとの集計
     const uniqMap = new Map();
     combined.forEach(p => {
       const k = cfgToKey(p.cfg);
       if(!uniqMap.has(k)) uniqMap.set(k, p);
     });
     const patterns = Array.from(uniqMap.values());
+
+    // 鏡の数ごとの集計処理
+    const mStats = {};
+    patterns.forEach(p => {
+      // 0以外の要素（配置された鏡）の数を数える
+      const mCount = p.cfg.filter(m => m !== 0).length;
+      mStats[mCount] = (mStats[mCount] || 0) + 1;
+    });
+
+    // 集計結果のHTML構築
+    let statsHtml = `<b>💡 発見された有効パターンの内訳</b>（計 ${patterns.length} 種類）<br>`;
+    if(!doExact) {
+      statsHtml = `<b>💡 サンプリングで発見されたパターンの内訳</b>（計 ${patterns.length} 種類）<br>`;
+    }
+    statsHtml += `<div class="stats-tags">`;
+    const sortedKeys = Object.keys(mStats).map(Number).sort((a,b)=>a-b);
+    sortedKeys.forEach(k => {
+      statsHtml += `<span class="stats-tag">鏡 <b>${k}</b> 枚： ${mStats[k]} 件</span>`;
+    });
+    statsHtml += `</div>`;
+    mirrorStats.innerHTML = statsHtml;
+    mirrorStats.style.display = 'block';
+
     renderThumbs(patterns, N);
   });
 
@@ -405,9 +437,8 @@ const EXP = (function(){
   function renderThumbs(patterns, N){
     thumbs.innerHTML='';
     if(!patterns || patterns.length===0){ thumbs.textContent='有効なパターンはありません。'; return; }
-    const uniq = new Map();
-    patterns.forEach(p => { uniq.set(cfgToKey(p.cfg), p); });
-    const list = Array.from(uniq.values());
+    // すでにuniq化されているのでそのまま使用
+    const list = patterns; 
     const maxLen = Math.max(...list.map(p=>p.path.length));
     const longestIndex = list.findIndex(p=>p.path.length===maxLen);
     if(longestIndex > 0){ const [lp] = list.splice(longestIndex,1); list.unshift(lp); }
@@ -418,10 +449,11 @@ const EXP = (function(){
     async function drawBatch(){
       for(let b=0; b<batchSize && i<finalList.length; b++, i++){
         const item = finalList[i];
+        const mCount = item.cfg.filter(m => m !== 0).length; // 鏡の数を計算
         const div = document.createElement('div'); div.className='thumb';
         const canvas = document.createElement('canvas'); canvas.width=120; canvas.height=120; div.appendChild(canvas);
         const info = document.createElement('div'); info.className='small';
-        info.textContent = `入 ${ (item.inputIndex!=null ? (item.inputIndex+1)+' → ' : '') }出 ${String.fromCharCode(65 + (item.exitRow ?? 0))} / ${item.path.length}${item.path.length===maxLen ? ' ⭐最長' : ''}`;
+        info.innerHTML = `入${ (item.inputIndex!=null ? (item.inputIndex+1)+'→' : '') }出${String.fromCharCode(65 + (item.exitRow ?? 0))} / 鏡${mCount}<br>長さ: ${item.path.length}${item.path.length===maxLen ? ' ⭐最長' : ''}`;
         div.appendChild(info);
         thumbs.appendChild(div);
         const ctx = canvas.getContext('2d');
@@ -445,7 +477,7 @@ const EXP = (function(){
         div.addEventListener('click', ()=> drawGrid(N, item.cfg, item.path));
       }
       if(performance.now() - startTime > maxAllowed){
-        thumbs.innerHTML = '💡 描画負荷が高いため、最長経路のみを表示します。';
+        thumbs.innerHTML += '<br>💡 描画負荷が高いため、表示を省略しました。';
         const first = finalList[0];
         if(first) drawGrid(N, first.cfg, first.path);
         return;
