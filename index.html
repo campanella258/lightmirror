@@ -188,6 +188,7 @@ const EXP = (function(){
     const grid = new Array(N * N).fill(-1);
     const history = new Uint8Array(N * N * 4); 
     const currentPath = [];
+    const mStats = {}; // 探索中にリアルタイムで鏡の数を集計
 
     function* exploreGen(r, c, dir) {
       if (++counter % 100000 === 0) yield counter;
@@ -195,12 +196,22 @@ const EXP = (function(){
       if (r < 0 || r >= N || c < 0 || c >= N) {
         if (c === N && r >= 0 && r < N) {
           totalCount++;
+          
+          // --- メモリ制限に関係なく、全件の鏡の数を集計 ---
+          let mCount = 0;
+          for(let i=0; i<grid.length; i++){
+            if(grid[i] === 1 || grid[i] === 2) mCount++;
+          }
+          mStats[mCount] = (mStats[mCount] || 0) + 1;
+          // ------------------------------------------------
+
           const pathLen = currentPath.length;
           if (pathLen > longest) {
             longest = pathLen;
             const canon = grid.map(v => v === -1 ? 0 : v);
             best = { cfg: canon, path: currentPath.slice(), exitRow: r };
           }
+          // 保存用データはブラウザ負荷対策で上限を設ける
           if (savedPatterns.length < MAX_KEEP) {
             const canon = grid.map(v => v === -1 ? 0 : v);
             savedPatterns.push({ cfg: canon, path: currentPath.slice(), exitRow: r });
@@ -253,7 +264,7 @@ const EXP = (function(){
         patterns.unshift(best);
       }
     }
-    return { count: totalCount, patterns, longest };
+    return { count: totalCount, patterns, longest, mStats }; // 全件集計データを返す
   }
 
   async function approximateEnumerate(N, startInput, depthLimit, maxSamples, isHybrid, progressCb){
@@ -297,8 +308,23 @@ const EXP = (function(){
       if(s % 2000 === 0) await new Promise(r=>setTimeout(r,0));
     }
     if(progressCb) progressCb(maxSamples, maxSamples);
+    
     const total = Math.pow(3, N*N);
-    const estimatedCount = Math.round(total * (seen.size / Math.max(1, maxSamples)));
+    const factor = total / Math.max(1, maxSamples);
+    
+    // サンプリングに基づく推定内訳の算出
+    const mStatsRaw = {};
+    for(const p of seen.values()){
+      const mCount = p.cfg.filter(m => m !== 0).length;
+      mStatsRaw[mCount] = (mStatsRaw[mCount] || 0) + 1;
+    }
+    const mStats = {};
+    let finalEstimatedCount = 0;
+    for(const k in mStatsRaw){
+      mStats[k] = Math.round(mStatsRaw[k] * factor);
+      finalEstimatedCount += mStats[k];
+    }
+
     const patterns = [...seen.values()];
     if(best){
       const bestKey = cfgToKey(best.cfg);
@@ -306,7 +332,7 @@ const EXP = (function(){
       if(idx>0){ const p = patterns.splice(idx,1)[0]; patterns.unshift(p); }
       else if(idx===-1) patterns.unshift(best);
     }
-    return { estimatedCount, patterns, longest };
+    return { estimatedCount: finalEstimatedCount, patterns, longest, mStats };
   }
 
   function drawGrid(N, cfg, path){
@@ -360,6 +386,8 @@ const EXP = (function(){
 
     resultSummary.textContent = doExact ? '完全探索中...' : '探索中...';
     let combined = [], totalCount = 0, overallLongest = 0;
+    let globalMStats = {}; // 全入力の集計を統合
+
     const inputs = (inputVal === 'all') ? [...Array(N).keys()] : [parseInt(inputVal,10)];
 
     for(let sIdx=0; sIdx<inputs.length; sIdx++){
@@ -373,6 +401,7 @@ const EXP = (function(){
           progressSpan.textContent = `入力 ${s+1} を計算中... (探索ノード: ${nodesCount.toLocaleString()}回)`;
         });
         totalCount += res.count;
+        for(const k in res.mStats) globalMStats[k] = (globalMStats[k] || 0) + res.mStats[k];
       } else {
         res = await approximateEnumerate(N, s, depthLimit, maxSamples, isHybrid, (done, total)=> {
           if (total === "DFS") {
@@ -382,6 +411,7 @@ const EXP = (function(){
           }
         });
         totalCount += (res.estimatedCount ?? 0);
+        for(const k in res.mStats) globalMStats[k] = (globalMStats[k] || 0) + res.mStats[k];
       }
       if(res.longest > overallLongest) overallLongest = res.longest ?? 0;
       res.patterns.forEach(p => combined.push(Object.assign({inputIndex: s}, p)));
@@ -392,37 +422,28 @@ const EXP = (function(){
       (doExact ? `有効パターン数（正確）: <strong>${totalCount}</strong>` : `推定有効パターン数: 約${totalCount}`) +
       `<br>発見された最長経路マス数: ${overallLongest}`;
 
-    // ユニークパターンの抽出と、鏡の数ごとの集計
-    const uniqMap = new Map();
-    combined.forEach(p => {
-      const k = cfgToKey(p.cfg);
-      if(!uniqMap.has(k)) uniqMap.set(k, p);
-    });
-    const patterns = Array.from(uniqMap.values());
-
-    // 鏡の数ごとの集計処理
-    const mStats = {};
-    patterns.forEach(p => {
-      // 0以外の要素（配置された鏡）の数を数える
-      const mCount = p.cfg.filter(m => m !== 0).length;
-      mStats[mCount] = (mStats[mCount] || 0) + 1;
-    });
-
-    // 集計結果のHTML構築
-    let statsHtml = `<b>💡 発見された有効パターンの内訳</b>（計 ${patterns.length} 種類）<br>`;
+    // 集計結果（裏で完全カウントしたもの）のHTML構築
+    let statsHtml = `<b>💡 発見された有効パターンの内訳</b>（計 ${totalCount} 件）<br>`;
     if(!doExact) {
-      statsHtml = `<b>💡 サンプリングで発見されたパターンの内訳</b>（計 ${patterns.length} 種類）<br>`;
+      statsHtml = `<b>💡 サンプリングによる推定内訳</b>（計 約${totalCount} 件）<br>`;
     }
     statsHtml += `<div class="stats-tags">`;
-    const sortedKeys = Object.keys(mStats).map(Number).sort((a,b)=>a-b);
+    const sortedKeys = Object.keys(globalMStats).map(Number).sort((a,b)=>a-b);
     sortedKeys.forEach(k => {
-      statsHtml += `<span class="stats-tag">鏡 <b>${k}</b> 枚： ${mStats[k]} 件</span>`;
+      statsHtml += `<span class="stats-tag">鏡 <b>${k}</b> 枚： ${globalMStats[k]} 件</span>`;
     });
     statsHtml += `</div>`;
     mirrorStats.innerHTML = statsHtml;
     mirrorStats.style.display = 'block';
 
-    renderThumbs(patterns, N);
+    // 以下はUI描画用（重複除去済み・上限あり）
+    const uniqMap = new Map();
+    combined.forEach(p => {
+      const k = cfgToKey(p.cfg);
+      if(!uniqMap.has(k)) uniqMap.set(k, p);
+    });
+    const renderPatterns = Array.from(uniqMap.values());
+    renderThumbs(renderPatterns, N);
   });
 
   function updateInputOptions(){
